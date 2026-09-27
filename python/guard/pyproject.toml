@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandlock-guard"
+version = "0.1.0"
+description = "Dependency-free text inspection for prompt-injection patterns"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+dependencies = []
+
+[tool.setuptools]
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

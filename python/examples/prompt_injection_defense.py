@@ -258,6 +258,15 @@ def demo_xoa_sandboxed(client: OpenAI, csv_path: str, exfil_port: int):
 
     # The planner script runs inside the sandbox: calls the LLM,
     # extracts the code block, and prints it to stdout.
+    planner_prompt = (
+        "Write Python code (standard library only, use csv module, "
+        "no pandas) that reads a CSV file from the path in "
+        "environment variable DATA_FILE. The CSV has columns: "
+        "name, department, salary. Print a summary with:\\n"
+        "  - Total employees\\n"
+        "  - Average salary\\n"
+        "  - Department breakdown (count per department)\\n"
+    )
     planner_script = textwrap.dedent(f"""\
         import sys
         from openai import OpenAI
@@ -267,15 +276,7 @@ def demo_xoa_sandboxed(client: OpenAI, csv_path: str, exfil_port: int):
             model="gpt-4o-mini",
             messages=[
                 {{"role": "system", "content": {repr(_SYSTEM)}}},
-                {{"role": "user", "content": {repr(
-                    "Write Python code (standard library only, use csv module, "
-                    "no pandas) that reads a CSV file from the path in "
-                    "environment variable DATA_FILE. The CSV has columns: "
-                    "name, department, salary. Print a summary with:\\n"
-                    "  - Total employees\\n"
-                    "  - Average salary\\n"
-                    "  - Department breakdown (count per department)\\n"
-                )}}},
+                {{"role": "user", "content": {planner_prompt!r}}},
             ],
             temperature=0,
         )

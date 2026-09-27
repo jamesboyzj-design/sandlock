@@ -460,6 +460,45 @@ Create a lazy `Stage` bound to this sandbox.
 
 Run the pipeline. Each stage's stdout feeds the next stage's stdin.
 
+### Prompt guard
+
+`PromptGuard`, `Rule`, `ScanReport`, `Finding`, and `ScanError` are available from
+`sandlock_guard` and `sandlock.guard`; only the latter adds `stage()`.
+
+#### `PromptGuard(threshold="medium", max_bytes=1_048_576, scan_timeout=2.0, rules=())`
+
+`threshold`: `low`, `medium`, `high`, or `critical`. `max_bytes`: positive UTF-8
+input byte limit. `scan_timeout`: positive finite stage scanning deadline in
+seconds, starting after EOF. `rules`: iterable of custom `Rule` objects, copied
+to an immutable tuple and added to the built-in rules. Duplicate IDs, including
+built-in IDs, raise `ValueError`; non-Rule entries raise `TypeError`.
+
+#### `Rule(id: str, pattern: str, severity: str, message: str)`
+
+Immutable custom rule. `id` starts with an ASCII letter and contains up to 64
+letters, digits, underscores, dots, or hyphens. `pattern` is a nonempty Python
+regex compiled case-insensitively; `severity` uses the same levels as `threshold`.
+`message` is a nonblank finding description. Invalid fields raise `ValueError`.
+
+#### `guard.scan(text: str) -> ScanReport`
+
+Scan synchronously without a wall-clock timeout. Raises `TypeError` for
+non-string input or `ScanError` if inspection cannot complete.
+
+#### `guard.stage() -> Stage`
+
+Return a sandboxed stage forwarding original UTF-8 bytes only after approval.
+Exit codes: 0 accepted, 1 rejected, 2 input or scanning error.
+
+#### Report and error types
+
+- `ScanReport`: `flagged: bool` (any finding meets the threshold),
+  `findings: tuple[Finding, ...]`, `input_bytes: int`, `ruleset_version: str`.
+- `Finding`: `rule_id: str`, `severity: str`, `message: str`.
+- `ScanError.code: str`: inspection failure identifier.
+
+See [Prompt injection defenses](../docs/prompt_injection.md) for usage and limits.
+
 ### Gather
 
 Fan multiple producers into one consumer via named pipes. Each

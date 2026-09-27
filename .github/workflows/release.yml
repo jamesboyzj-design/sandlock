@@ -162,7 +162,7 @@ jobs:
         working-directory: python
         run: |
           pip install pytest
-          pip install -e '.[mcp]'
+          pip install -e ./guard -e '.[mcp,guard]'
           pytest tests/ -v
 
   # Publish Rust crates to crates.io
