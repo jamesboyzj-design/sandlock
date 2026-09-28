@@ -12,6 +12,7 @@ import binascii
 import html
 import json
 import math
+import os
 import re
 import signal
 import sys
@@ -19,8 +20,14 @@ import unicodedata
 from dataclasses import dataclass, field
 from collections import deque
 from html.parser import HTMLParser
-from typing import Tuple
+from typing import Optional, Tuple
 from urllib.parse import unquote
+
+if __package__:
+    from ._classifier import Model
+else:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from _classifier import Model
 
 _LEVELS = ('low', 'medium', 'high', 'critical')
 _RULESET = '4'
@@ -194,6 +201,8 @@ class ScanReport:
     findings: Tuple[Finding, ...]
     input_bytes: int
     ruleset_version: str = _RULESET
+    model_score: Optional[float] = None
+    model_digest: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +217,8 @@ class PromptGuard:
     max_bytes: int = 1_048_576
     scan_timeout: float = 2.0
     rules: Tuple[Rule, ...] = ()
+    model: Optional[str] = None
+    _model: Optional[Model] = field(init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self):
         if self.threshold not in _LEVELS:
@@ -219,7 +230,7 @@ class PromptGuard:
                 or not math.isfinite(self.scan_timeout) or self.scan_timeout <= 0):
             raise ValueError('scan_timeout must be positive and finite')
         rules = tuple(self.rules)
-        ids = {name for name, _, _, _ in _RULES}
+        ids = {name for name, _, _, _ in _RULES} | {'statistical-injection'}
         for rule in rules:
             if not isinstance(rule, Rule):
                 raise TypeError('rules must contain Rule objects')
@@ -227,6 +238,10 @@ class PromptGuard:
                 raise ValueError('Duplicate rule ID: ' + rule.id)
             ids.add(rule.id)
         object.__setattr__(self, 'rules', rules)
+        if self.model is not None:
+            path = os.path.realpath(os.fspath(self.model))
+            object.__setattr__(self, 'model', path)
+            object.__setattr__(self, '_model', Model.load(path))
 
     def scan(self, text: str) -> ScanReport:
         """Inspect text without changing it; raise ScanError on incomplete scans."""
@@ -242,15 +257,23 @@ class PromptGuard:
             raise ScanError('input_too_large')
         try:
             found = {}
+            score = None
             rules = _RULES + tuple((r.id, r.severity, r._compiled, r.message) for r in self.rules)
             for view in self._views(text):
                 for name, level, pattern, message in rules:
                     if pattern.search(view):
                         found[name] = Finding(name, level, message)
+                if self._model is not None:
+                    value = self._model.score(view)
+                    score = value if score is None else max(score, value)
+            if self._model is not None and score >= self._model.threshold:
+                found['statistical-injection'] = Finding(
+                    'statistical-injection', 'high', 'Statistical classifier threshold exceeded')
             findings = tuple(found.values())
             flagged = any(_LEVELS.index(f.severity) >= _LEVELS.index(self.threshold)
                           for f in findings)
-            return ScanReport(flagged, findings, size)
+            return ScanReport(flagged, findings, size, model_score=score,
+                              model_digest=self._model.digest if self._model else None)
         except ScanError:
             raise
         except Exception:
@@ -310,7 +333,10 @@ def _deadline(signum, frame):
 def _main():
     try:
         rules = tuple(Rule(**r) for r in json.loads(sys.argv[4])) if len(sys.argv) > 4 else ()
-        guard = PromptGuard(sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), rules)
+        model = sys.argv[5] if len(sys.argv) > 5 else None
+        guard = PromptGuard(sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), rules, model)
+        if model is not None and guard._model.digest != sys.argv[6]:
+            raise ScanError('model_changed')
         data = sys.stdin.buffer.read(guard.max_bytes + 1)
         if len(data) > guard.max_bytes:
             raise ScanError('input_too_large')

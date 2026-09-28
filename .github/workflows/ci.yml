@@ -147,7 +147,7 @@ jobs:
         working-directory: python
         run: |
           pip install pytest
-          pip install -e ./guard -e '.[mcp,guard]'
+          pip install -e './guard[train]' -e '.[mcp,guard]'
 
       - name: Run Python tests
         working-directory: python

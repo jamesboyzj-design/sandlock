@@ -23,12 +23,18 @@ class PromptGuard(TextGuard):
         from .sandbox import Sandbox
 
         runtime_paths = ['/usr', '/lib', '/lib64', sys.prefix, sys.base_prefix,
-                         os.path.realpath(sys.executable), os.path.realpath(_scanner.__file__)]
+                         os.path.realpath(sys.executable),
+                         os.path.dirname(os.path.realpath(_scanner.__file__))]
+        if self.model is not None:
+            runtime_paths.append(self.model)
         sandbox = Sandbox(
             fs_readable=list(dict.fromkeys(p for p in runtime_paths if os.path.exists(p))),
             net_allow=[], clean_env=True, max_memory='256M',
         )
         rules = json.dumps([dict(id=r.id, pattern=r.pattern, severity=r.severity,
                                  message=r.message) for r in self.rules])
-        return sandbox.cmd([sys.executable, '-I', os.path.realpath(_scanner.__file__),
-                            self.threshold, str(self.max_bytes), str(self.scan_timeout), rules])
+        args = [sys.executable, '-I', os.path.realpath(_scanner.__file__),
+                self.threshold, str(self.max_bytes), str(self.scan_timeout), rules]
+        if self.model is not None:
+            args.extend((self.model, self._model.digest))
+        return sandbox.cmd(args)

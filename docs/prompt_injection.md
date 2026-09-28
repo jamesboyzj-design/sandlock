@@ -160,6 +160,81 @@ Use the stage for custom patterns that require an enforced deadline. Configurati
 is passed as a JSON command argument, so it is subject to OS argument-size limits
 and should not contain secrets.
 
+### Optional statistical classifier
+
+The guard can supplement its rules with character n-gram logistic regression.
+Runtime inference uses only the Python standard library. No pretrained model is
+bundled: model quality depends on the training data and the application being
+protected. This is an experimental option, disabled unless a model is supplied.
+
+```python
+from sandlock_guard import PromptGuard
+
+guard = PromptGuard(model="guard-model.json")
+report = guard.scan(text)
+print(report.model_score, report.model_digest)
+```
+
+The same `model` argument works with `sandlock.guard.PromptGuard` and `.stage()`.
+The scanner loads a snapshot of the JSON model at construction. The worker checks
+its SHA-256 digest against that snapshot and fails with `model_changed` if the
+file contents change. Missing or invalid worker models also fail closed. Model
+files are trusted application configuration and must remain available to workers.
+They contain weights, not executable Python or pickle data.
+
+Each raw or decoded view is normalized with NFKC, case folding, and whitespace
+collapsing. The classifier uses the presence of character fragments of length
+3, 4, and 5 in overlapping 512-character windows with a 256-character stride.
+The report contains the maximum score across all windows and views. Scores at
+or above the model's threshold produce a `high` severity finding with ID
+`statistical-injection`; the usual severity threshold still applies. Scores are
+model outputs, not calibrated probabilities of an attack. Short attacks can
+still be diluted by surrounding text within a window.
+
+Train offline from the repository root:
+
+```sh
+python3 -m pip install -e 'python/guard[train]'
+python3 python/guard/train.py train.jsonl validation.jsonl test.jsonl guard-model.json
+```
+
+Each JSONL row must contain `text`, an integer `label` (0 benign, 1 injection),
+and a nonempty `group` identifying its source or attack family:
+
+```json
+{"text": "Quarterly revenue increased.", "label": 0, "group": "financial-reports"}
+```
+
+Prepare three disjoint datasets containing both classes. Keep all paraphrases,
+typos, and variants of one attack family in the same group and split. The tool
+rejects overlapping groups and identical normalized text across splits; it does
+not infer families or detect every near-duplicate. Positive training examples
+must be localized excerpts of at most 512 normalized characters, so unrelated
+windows do not inherit an attack label. Benign training documents may be longer.
+Validation and test documents are scanned in full, including decoded views.
+Inspection errors abort training or evaluation rather than silently dropping rows.
+
+Training learns up to 20,000 feature weights. The validation negatives set a
+threshold targeting at most 1% false positives on that validation set; use
+`--max-fpr` to change this budget. This does not guarantee the same rate on new
+documents, and very small validation sets cannot support a meaningful estimate.
+The untouched test set reports recall, false positives, and confusion counts for
+rules alone, the classifier, and their combination. The output file must not
+already exist. It records the training library version and hashes of all three
+datasets. The loader limits models to 2 MiB and validates the format and weights.
+
+Evaluate on representative fetched documents, legitimate instructions, quoted
+attacks, technical manuals, and unseen attack families before deployment. A
+classifier trained to distinguish generic questions from instructions can learn
+that distinction instead of detecting prompt injection. Neither a high benchmark
+score nor a low score for a particular input establishes trustworthiness.
+
+To try a model with the pipeline example:
+
+```sh
+python3 python/examples/text_guard.py guard-model.json < document.txt
+```
+
 ### Use the guard as a pipeline stage
 
 Import `PromptGuard` from `sandlock.guard` to add `.stage()` to the same scanner.
@@ -197,7 +272,8 @@ includes a consumer that rejects empty input.
 
 The worker runs with a clean environment, no network, and a 256 MiB memory limit.
 Its readable paths include system and Python runtime directories and the scanner
-file; files within those allowed directories are not confidential from it.
+package directory and configured model file; files within those allowed directories
+are not confidential from it.
 `scan_timeout` bounds scanning after EOF. Use the pipeline timeout to also bound
 input collection and execution. Direct `.scan()` runs in the caller and has no
 wall-clock deadline.
@@ -227,7 +303,8 @@ unique views, 64 distinct encoded candidates, and a cumulative view size of eigh
 times `max_bytes`. Exceeding a processing budget raises `ScanError` rather than
 returning an approving report from a truncated inspection.
 
-A passed scan means only that the configured rules found no reason to reject.
+A passed scan means only that the configured rules and optional classifier found
+no reason to reject.
 It does not establish trustworthy intent, detect every encoding or language, or
 justify wider permissions. Keep confinement and application authorization in
 place after approval. See the [Prompt guard API](../python/README.md#prompt-guard)

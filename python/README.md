@@ -465,13 +465,17 @@ Run the pipeline. Each stage's stdout feeds the next stage's stdin.
 `PromptGuard`, `Rule`, `ScanReport`, `Finding`, and `ScanError` are available from
 `sandlock_guard` and `sandlock.guard`; only the latter adds `stage()`.
 
-#### `PromptGuard(threshold="medium", max_bytes=1_048_576, scan_timeout=2.0, rules=())`
+#### `PromptGuard(threshold="medium", max_bytes=1_048_576, scan_timeout=2.0, rules=(), model=None)`
 
 `threshold`: `low`, `medium`, `high`, or `critical`. `max_bytes`: positive UTF-8
 input byte limit. `scan_timeout`: positive finite stage scanning deadline in
 seconds, starting after EOF. `rules`: iterable of custom `Rule` objects, copied
 to an immutable tuple and added to the built-in rules. Duplicate IDs, including
 built-in IDs, raise `ValueError`; non-Rule entries raise `TypeError`.
+`model`: optional path to a trained classifier JSON file, loaded at construction.
+Invalid models raise `ValueError`; file access errors raise `OSError`. A classifier
+score meeting the model's threshold adds a `high` severity `statistical-injection`
+finding. That rule ID is reserved. Model changes before worker startup fail closed.
 
 #### `Rule(id: str, pattern: str, severity: str, message: str)`
 
@@ -493,7 +497,9 @@ Exit codes: 0 accepted, 1 rejected, 2 input or scanning error.
 #### Report and error types
 
 - `ScanReport`: `flagged: bool` (any finding meets the threshold),
-  `findings: tuple[Finding, ...]`, `input_bytes: int`, `ruleset_version: str`.
+  `findings: tuple[Finding, ...]`, `input_bytes: int`, `ruleset_version: str`,
+  `model_score: float | None` (maximum window score),
+  `model_digest: str | None` (SHA-256 of model bytes).
 - `Finding`: `rule_id: str`, `severity: str`, `message: str`.
 - `ScanError.code: str`: inspection failure identifier.
 
