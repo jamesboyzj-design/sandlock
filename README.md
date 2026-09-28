@@ -186,6 +186,7 @@ confine(&confinement)?;
 | [`docs/network.md`](docs/network.md) | Endpoint grammar, protocol gating, HTTP interception, bind rules, port virtualization |
 | [`docs/policy-fn.md`](docs/policy-fn.md) | Dynamic policy callbacks: events, verdicts, context methods, TOCTOU guarantees |
 | [`docs/pipelines.md`](docs/pipelines.md) | Pipelines, the XOA pattern, COW fork and map-reduce |
+| [`docs/prompt_injection.md`](docs/prompt_injection.md) | Prompt injection defenses: isolation, permissions, credentials, and text inspection |
 | [`docs/architecture.md`](docs/architecture.md) | Crate layout, confinement sequence, supervisor handlers, COW filesystem |
 | [`docs/learn.md`](docs/learn.md) | `sandlock learn`: generate a profile from an observed run |
 | [`docs/extension-handlers.md`](docs/extension-handlers.md) | Custom seccomp-notification handlers (Rust and C ABI) |

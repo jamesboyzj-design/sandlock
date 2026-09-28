@@ -147,11 +147,22 @@ jobs:
         working-directory: python
         run: |
           pip install pytest
-          pip install -e '.[mcp]'
+          pip install -e './guard[train]' -e '.[mcp,guard]'
 
       - name: Run Python tests
         working-directory: python
         run: pytest tests/ -v
+
+      - name: Test optional Transformers classifier
+        if: matrix.runner == 'ubuntu-latest' && matrix.python-version == '3.12'
+        working-directory: python
+        env:
+          OMP_NUM_THREADS: '1'
+          OPENBLAS_NUM_THREADS: '1'
+        run: |
+          pip install 'torch>=2.2,<3' --index-url https://download.pytorch.org/whl/cpu
+          pip install -e './guard[transformers]'
+          pytest tests/test_guard_classifiers.py -v
 
   go:
     name: Go SDK (${{ matrix.runner }})
