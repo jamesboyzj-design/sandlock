@@ -462,20 +462,38 @@ Run the pipeline. Each stage's stdout feeds the next stage's stdin.
 
 ### Prompt guard
 
-`PromptGuard`, `Rule`, `ScanReport`, `Finding`, and `ScanError` are available from
+`PromptGuard`, `Rule`, `ScanReport`, `Finding`, `ScanError`, `StatisticalClassifier`,
+and `TransformersClassifier` are available from
 `sandlock_guard` and `sandlock.guard`; only the latter adds `stage()`.
 
-#### `PromptGuard(threshold="medium", max_bytes=1_048_576, scan_timeout=2.0, rules=(), model=None)`
+#### `PromptGuard(threshold="medium", max_bytes=1_048_576, scan_timeout=2.0, rules=(), model=None, classifier=None)`
 
 `threshold`: `low`, `medium`, `high`, or `critical`. `max_bytes`: positive UTF-8
 input byte limit. `scan_timeout`: positive finite stage scanning deadline in
 seconds, starting after EOF. `rules`: iterable of custom `Rule` objects, copied
 to an immutable tuple and added to the built-in rules. Duplicate IDs, including
 built-in IDs, raise `ValueError`; non-Rule entries raise `TypeError`.
-`model`: optional path to a trained classifier JSON file, loaded at construction.
-Invalid models raise `ValueError`; file access errors raise `OSError`. A classifier
-score meeting the model's threshold adds a `high` severity `statistical-injection`
-finding. That rule ID is reserved. Model changes before worker startup fail closed.
+`classifier`: optional `StatisticalClassifier` or `TransformersClassifier` configuration.
+`model`: compatibility alias for `classifier=StatisticalClassifier(model)`.
+Supplying both raises `ValueError`; unsupported classifiers raise `TypeError`.
+A classifier score meeting its own threshold adds a `high` severity finding.
+The IDs `statistical-injection` and `transformers-injection` are reserved.
+
+#### `StatisticalClassifier(path, threshold=None)`
+
+Load an existing classifier JSON file. `threshold=None` uses the value in the file;
+an explicit threshold must be strictly between 0 and 1. Invalid models raise
+`ValueError`; file access errors raise `OSError`.
+
+#### `TransformersClassifier(path, positive_labels, threshold=0.5, max_length=512, stride=256)`
+
+Configure local CPU inference; requires the optional `transformers` extra.
+`positive_labels`: nonempty sequence of exact class names whose softmax scores
+are summed. Supports mutually exclusive classification with at least two classes.
+`max_length`: 4 to 8192 tokens, within the model's limit. `stride`: overlapping
+tokens, less than the window's content capacity. `threshold`: strictly between
+0 and 1. `path` names a directory with regular model and fast-tokenizer files,
+fingerprinted at construction. Runtime loading is lazy; scan failures raise `ScanError`.
 
 #### `Rule(id: str, pattern: str, severity: str, message: str)`
 
@@ -489,17 +507,19 @@ regex compiled case-insensitively; `severity` uses the same levels as `threshold
 Scan synchronously without a wall-clock timeout. Raises `TypeError` for
 non-string input or `ScanError` if inspection cannot complete.
 
-#### `guard.stage() -> Stage`
+#### `guard.stage(*, max_memory=None) -> Stage`
 
 Return a sandboxed stage forwarding original UTF-8 bytes only after approval.
 Exit codes: 0 accepted, 1 rejected, 2 input or scanning error.
+`max_memory` overrides the default memory limit: 256 MiB for rules or statistics,
+2 GiB for Transformers. Changed model files fail closed at worker startup.
 
 #### Report and error types
 
 - `ScanReport`: `flagged: bool` (any finding meets the threshold),
   `findings: tuple[Finding, ...]`, `input_bytes: int`, `ruleset_version: str`,
   `model_score: float | None` (maximum window score),
-  `model_digest: str | None` (SHA-256 of model bytes).
+  `model_digest: str | None` (SHA-256 of the JSON file or neural model file manifest).
 - `Finding`: `rule_id: str`, `severity: str`, `message: str`.
 - `ScanError.code: str`: inspection failure identifier.
 

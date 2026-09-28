@@ -165,6 +165,17 @@ jobs:
           pip install -e './guard[train]' -e '.[mcp,guard]'
           pytest tests/ -v
 
+      - name: Test optional Transformers classifier
+        if: matrix.python == '3.12'
+        working-directory: python
+        env:
+          OMP_NUM_THREADS: '1'
+          OPENBLAS_NUM_THREADS: '1'
+        run: |
+          pip install 'torch>=2.2,<3' --index-url https://download.pytorch.org/whl/cpu
+          pip install -e './guard[transformers]'
+          pytest tests/test_guard_classifiers.py -v
+
   # Publish Rust crates to crates.io
   publish-crates:
     name: Publish to crates.io

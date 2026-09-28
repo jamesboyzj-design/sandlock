@@ -168,14 +168,18 @@ bundled: model quality depends on the training data and the application being
 protected. This is an experimental option, disabled unless a model is supplied.
 
 ```python
-from sandlock_guard import PromptGuard
+from sandlock_guard import PromptGuard, StatisticalClassifier
 
-guard = PromptGuard(model="guard-model.json")
+guard = PromptGuard(classifier=StatisticalClassifier("guard-model.json"))
 report = guard.scan(text)
 print(report.model_score, report.model_digest)
 ```
 
-The same `model` argument works with `sandlock.guard.PromptGuard` and `.stage()`.
+The same `classifier` argument works with `sandlock.guard.PromptGuard` and `.stage()`.
+Existing `guard-model.json` files need no conversion. The earlier
+`PromptGuard(model="guard-model.json")` API remains a compatibility alias; do not
+supply both `model` and `classifier`. `StatisticalClassifier(path, threshold=0.9)`
+can override the threshold stored in the file.
 The scanner loads a snapshot of the JSON model at construction. The worker checks
 its SHA-256 digest against that snapshot and fails with `model_changed` if the
 file contents change. Missing or invalid worker models also fail closed. Model
@@ -235,6 +239,81 @@ To try a model with the pipeline example:
 python3 python/examples/text_guard.py guard-model.json < document.txt
 ```
 
+### Optional Transformers classifier
+
+`TransformersClassifier` supports compatible local text classifiers through
+PyTorch and Transformers (Python 3.9 or newer), without requiring a particular
+model vendor or architecture. Install the optional dependencies in the Python
+environment that runs the guard:
+
+```sh
+python3 -m pip install -e 'python/guard[transformers]'
+```
+
+Obtain model files separately under the model provider's terms. Use a local
+directory containing `config.json`, `model.safetensors`,
+`tokenizer.json`, and any accompanying tokenizer configuration JSON files.
+Files must be regular files, not symlinks into a shared download cache.
+No weights are bundled or automatically downloaded.
+
+For example, [Meta Prompt Guard 2](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-22M)
+uses a `MALICIOUS` class and a 512-token context window:
+
+```python
+from sandlock.guard import TransformersClassifier, PromptGuard
+
+guard = PromptGuard(
+    classifier=TransformersClassifier(
+        "/opt/models/prompt-guard-2",
+        positive_labels=("MALICIOUS",),
+        threshold=0.5,
+        max_length=512,
+        stride=256,
+    ),
+    scan_timeout=30,
+)
+report = guard.scan(text)
+stage = guard.stage()
+```
+
+The backend loads safetensors locally with remote model code disabled and runs
+on CPU. It supports sequence classification architectures built into Transformers,
+with a fast tokenizer and at least two mutually exclusive classes. Set
+`positive_labels` to exact names in the model's `id2label` mapping. Multiple
+positive classes, such as `("injection", "jailbreak")`, have their softmax scores
+summed. Unknown labels, selecting every class, regression, and explicitly
+configured multi-label sigmoid models are rejected. When the model omits its
+problem type, the caller must ensure it was trained for mutually exclusive
+classification.
+
+Token windows and overlap are configurable with `max_length` and `stride`;
+inspection includes the document tail. Window size must fit the model, and
+overlap must leave space for content after special tokens. The report's
+`model_score` is the maximum positive-class score across windows and views.
+A score meeting the backend threshold adds a `transformers-injection` finding.
+Thresholds require application-specific evaluation and are not interchangeable
+between models or with statistical model thresholds.
+
+Construction fingerprints the model and tokenizer files, limited to 2 GiB in
+total. Neural imports and model loading happen on first scan; subsequent scans
+reuse the loaded runtime. Keep the model directory immutable during use. Workers
+verify the fingerprint before loading, and the backend checks it again around
+loading. Missing dependencies, unsupported models, and inference errors fail
+closed. The guard never falls back silently to rules alone.
+
+Transformers stages use a 2 GiB memory limit, allow reads of installed Python dependency
+directories and `/dev/urandom`, and retain network denial. CPU thread counts are
+limited in workers. A private temporary directory and `/dev/null` are writable;
+the temporary directory is removed when the stage is released. Model files remain
+read-only. Use `stage(max_memory="4G")` if the installed runtime needs
+more memory. Set `scan_timeout` to include cold imports, model loading and
+inference; the 2-second default may be too short. Use the pipeline timeout to
+bound the entire worker lifetime as well. Direct scans have no wall-clock limit.
+
+Both backend configurations are serialized as JSON for workers. Arbitrary
+classifier objects and Python callbacks are not supported by this API. Rules-only
+and statistical scans do not import PyTorch or Transformers.
+
 ### Use the guard as a pipeline stage
 
 Import `PromptGuard` from `sandlock.guard` to add `.stage()` to the same scanner.
@@ -270,7 +349,8 @@ stderr follows normal pipeline behavior and is not captured as the final stage's
 stderr. The complete [text guard example](../python/examples/text_guard.py)
 includes a consumer that rejects empty input.
 
-The worker runs with a clean environment, no network, and a 256 MiB memory limit.
+The worker runs with a clean environment, no network, and a 256 MiB memory limit
+by default (2 GiB for Transformers, overridable with `stage(max_memory=...)`).
 Its readable paths include system and Python runtime directories and the scanner
 package directory and configured model file; files within those allowed directories
 are not confidential from it.
