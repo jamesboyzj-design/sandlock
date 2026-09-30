@@ -104,6 +104,7 @@ with Sandbox(fs_readable=["/usr", "/lib"]) as sb:
 | `workdir` | `str \| None` | `None` | Working directory; enables COW protection |
 | `chroot` | `str \| None` | `None` | Path to chroot into before confinement |
 | `fs_mount` | `dict[str, str]` | `{}` | Map virtual paths to host directories inside chroot |
+| `image` | `Image \| None` | `None` | Run inside a container image from `pull_image()` |
 | `cwd` | `str \| None` | `None` | Child working directory |
 
 #### Network
@@ -178,6 +179,40 @@ sandbox = Sandbox(
     fs_readable=["/usr", "/bin", "/lib", "/etc"],
 )
 ```
+
+#### Container images
+
+`sandlock.pull_image(reference, cache_dir=None) -> Image` fetches and unpacks
+a container image without a Docker daemon or root. `Sandbox(image=...)` runs
+inside it: the image's rootfs becomes the chroot with a copy-on-write layer
+over it, read access to `/` inside the image is granted, and its env and
+working directory fill only what `env` and `cwd` leave unset.
+
+| Reference | Source |
+|-----------|--------|
+| `python:3.12`, `ghcr.io/org/img@sha256:...`, `docker://...` | registry (Docker Hub by default) |
+| `oci:<dir>[:tag]` | OCI image layout directory |
+| `oci-archive:<file>[:tag]` | tar of an OCI image layout |
+| `docker-daemon:<ref>` | local Docker daemon (Docker 25+) |
+
+```python
+from sandlock import Sandbox, pull_image
+
+image = pull_image("python:3.12-slim")
+result = Sandbox(image=image, max_memory="512M").run(["python3", "-c", "print('hello')"])
+
+# Or the image's own command:
+Sandbox(image=image).run(image.config.default_cmd())
+```
+
+`Image` has `rootfs` and `config`; `ImageConfig` has `entrypoint`, `cmd`,
+`env` (`KEY=VALUE` strings), `working_dir`, and `default_cmd()`. Both are
+frozen dataclasses. Registry credentials come from `docker login`'s
+`~/.docker/config.json` (or `$DOCKER_CONFIG`); credential helpers are not
+run. Every blob is verified against its digest, and each image is unpacked
+once into `cache_dir`, or `$XDG_CACHE_HOME/sandlock/images` by default. A
+cached image named by digest starts without network access. Failures raise
+`SandlockError`.
 
 #### Resource limits
 

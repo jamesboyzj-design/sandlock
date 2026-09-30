@@ -54,7 +54,7 @@ sandbox = Sandbox(
     gpu_devices=None, cpu_cores=None, num_cpus=None,
 
     # Runtime kwargs (not serialized as policy)
-    name=None, policy_fn=None, init_fn=None, work_fn=None,
+    name=None, image=None, policy_fn=None, init_fn=None, work_fn=None,
 
     # Advanced (internal; usually configured via the fields above)
     notif_policy=None,
@@ -412,6 +412,7 @@ and have no TOML counterpart.
 | Field       | Type              | Default | Description                                                                                                |
 | ----------- | ----------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
 | `name`      | `str \| None`     | `None`  | Sandbox name and virtual hostname inside the sandbox. Auto-generated as `sandbox-{pid}` when omitted. Maximum 64 bytes; must not contain NUL. |
+| `image`     | `Image \| None`   | `None`  | Container image from `sandlock.pull_image()`. Its rootfs becomes the chroot with a copy-on-write layer; its env and working directory fill only what `env` and `cwd` leave unset. Runtime rather than policy because it names a local cache path. |
 | `policy_fn` | `Callable \| None`| `None`  | Per-event dynamic policy callback. See [`policy-fn.md`](policy-fn.md).                      |
 | `init_fn`   | `Callable \| None`| `None`  | Callback invoked once in the template process prior to COW fork.                                           |
 | `work_fn`   | `Callable \| None`| `None`  | Callback invoked in each COW clone; receives `clone_id` as its argument.                                   |
