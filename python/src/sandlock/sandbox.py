@@ -195,6 +195,29 @@ def renames(changes: Sequence[Change]) -> list[tuple[str, str]]:
     )
 
 
+@dataclass(frozen=True)
+class ImageConfig:
+    """How a container image expects to be run."""
+
+    entrypoint: tuple[str, ...] = ()
+    cmd: tuple[str, ...] = ()
+    env: tuple[str, ...] = ()
+    """``KEY=VALUE`` entries."""
+    working_dir: str | None = None
+
+    def default_cmd(self) -> list[str]:
+        """Entrypoint followed by Cmd, or ``/bin/sh`` when the image sets neither."""
+        return [*self.entrypoint, *self.cmd] or ["/bin/sh"]
+
+
+@dataclass(frozen=True)
+class Image:
+    """A container image unpacked by :func:`sandlock.pull_image`."""
+
+    rootfs: str
+    config: ImageConfig = field(default_factory=ImageConfig)
+
+
 @dataclass
 class Sandbox:
     """Sandbox configuration and runtime handle.
@@ -396,6 +419,11 @@ class Sandbox:
     # Optional chroot
     chroot: str | None = None
     """Path to chroot into before applying other confinement."""
+
+    image: Image | None = None
+    """Run inside a container image from :func:`sandlock.pull_image`.  Its
+    env and working directory only fill what ``env`` and ``cwd`` leave
+    unset."""
 
     fs_mount: Mapping[str, str] = field(default_factory=dict)
     """Map virtual paths to host directories inside chroot.
