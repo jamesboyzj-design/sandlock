@@ -192,6 +192,32 @@ pub unsafe extern "C" fn sandlock_sandbox_builder_chroot(
     Box::into_raw(Box::new(builder.chroot(path)))
 }
 
+/// Run inside an image, as JSON from `sandlock_image_pull`. Its Env and
+/// WorkingDir only fill what other setters leave unset.
+///
+/// Malformed JSON frees the builder and returns NULL, so the build fails
+/// rather than the sandbox quietly running without the image's rootfs.
+///
+/// # Safety
+/// `b` and `image_json` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn sandlock_sandbox_builder_image(
+    b: *mut SandboxBuilder,
+    image_json: *const c_char,
+) -> *mut SandboxBuilder {
+    if b.is_null() {
+        return b;
+    }
+    let builder = *Box::from_raw(b);
+    let image = (!image_json.is_null())
+        .then(|| serde_json::from_slice::<sandlock_core::image::Image>(CStr::from_ptr(image_json).to_bytes()).ok())
+        .flatten();
+    match image {
+        Some(image) => Box::into_raw(Box::new(builder.image(&image))),
+        None => ptr::null_mut(),
+    }
+}
+
 /// Validate one mount pair coming in over the C ABI.
 ///
 /// Returns `None` (meaning "add no mount") for anything that is not a pair
@@ -2595,6 +2621,48 @@ pub unsafe extern "C" fn sandlock_checkpoint_save(
     match (*cp)._private.save(std::path::Path::new(dir)) {
         Ok(()) => 0,
         Err(_) => -1,
+    }
+}
+
+/// Pull and unpack a container image (a registry reference, `oci:<dir>`,
+/// `oci-archive:<file>` or `docker-daemon:<ref>`), returning it as JSON
+/// `{"rootfs": ..., "config": {"entrypoint", "cmd", "env", "working_dir"}}`
+/// for `sandlock_sandbox_builder_image`. `cache_dir` may be NULL for the
+/// default cache. Returns NULL on error with `*err_msg` set; free either
+/// string with `sandlock_string_free`.
+///
+/// # Safety
+/// `reference` must be a valid C string; `cache_dir` a valid C string or
+/// NULL; `err_msg` a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sandlock_image_pull(
+    reference: *const c_char,
+    cache_dir: *const c_char,
+    err_msg: *mut *mut c_char,
+) -> *mut c_char {
+    if !err_msg.is_null() {
+        *err_msg = ptr::null_mut();
+    }
+    let fail = |msg: String| {
+        if !err_msg.is_null() {
+            *err_msg = CString::new(msg).map(CString::into_raw).unwrap_or(ptr::null_mut());
+        }
+        ptr::null_mut()
+    };
+    let Some(reference) = (!reference.is_null()).then(|| CStr::from_ptr(reference).to_str().ok()).flatten() else {
+        return fail("image reference must be a UTF-8 string".into());
+    };
+    let cache_dir = (!cache_dir.is_null())
+        .then(|| CStr::from_ptr(cache_dir).to_str().ok().map(std::path::PathBuf::from))
+        .flatten();
+    let pulled = with_runtime(|rt| rt.block_on(sandlock_core::image::pull(reference, cache_dir.as_deref())));
+    match pulled {
+        Some(Ok(image)) => match serde_json::to_string(&image) {
+            Ok(json) => CString::new(json).map(CString::into_raw).unwrap_or(ptr::null_mut()),
+            Err(e) => fail(e.to_string()),
+        },
+        Some(Err(e)) => fail(e.to_string()),
+        None => fail("could not start an async runtime".into()),
     }
 }
 

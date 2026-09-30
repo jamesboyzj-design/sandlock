@@ -401,6 +401,18 @@ sandlock_builder_t *sandlock_sandbox_builder_cwd(sandlock_builder_t *b, const ch
 sandlock_builder_t *sandlock_sandbox_builder_chroot(sandlock_builder_t *b, const char *path);
 
 /**
+ * Run inside an image, as JSON from `sandlock_image_pull`. Its Env and
+ * WorkingDir only fill what other setters leave unset.
+ *
+ * Malformed JSON frees the builder and returns NULL, so the build fails
+ * rather than the sandbox quietly running without the image's rootfs.
+ *
+ * # Safety
+ * `b` and `image_json` must be valid pointers.
+ */
+sandlock_builder_t *sandlock_sandbox_builder_image(sandlock_builder_t *b, const char *image_json);
+
+/**
  * Add a filesystem mount mapping (virtual_path -> host_path).
  *
  * Both paths must be non-empty UTF-8; anything else is ignored and adds no
@@ -1305,6 +1317,20 @@ sandlock_checkpoint_t *sandlock_handle_checkpoint(sandlock_handle_t *h);
  * `cp` must be a valid checkpoint pointer. `dir` must be a valid C string path.
  */
 int sandlock_checkpoint_save(const sandlock_checkpoint_t *cp, const char *dir);
+
+/**
+ * Pull and unpack a container image (a registry reference, `oci:<dir>`,
+ * `oci-archive:<file>` or `docker-daemon:<ref>`), returning it as JSON
+ * `{"rootfs": ..., "config": {"entrypoint", "cmd", "env", "working_dir"}}`
+ * for `sandlock_sandbox_builder_image`. `cache_dir` may be NULL for the
+ * default cache. Returns NULL on error with `*err_msg` set; free either
+ * string with `sandlock_string_free`.
+ *
+ * # Safety
+ * `reference` must be a valid C string; `cache_dir` a valid C string or
+ * NULL; `err_msg` a valid pointer or NULL.
+ */
+char *sandlock_image_pull(const char *reference, const char *cache_dir, char **err_msg);
 
 /**
  * Load a checkpoint from a directory.
