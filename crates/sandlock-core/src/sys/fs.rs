@@ -405,6 +405,37 @@ fn remove_dir_contents(dir_fd: RawFd) {
     unsafe { libc::closedir(dirp) };
 }
 
+/// List the entry names of a directory confined within `root`, without
+/// following a final symlink. Non-UTF-8 names are skipped.
+pub(crate) fn list_dir_in_root(root: &Path, rel: &str) -> Result<Vec<String>, i32> {
+    let dir_fd = openat2_in_root(
+        root,
+        rel,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )?;
+    let dirp = unsafe { libc::fdopendir(dir_fd) };
+    if dirp.is_null() {
+        let err = last_errno(libc::EIO);
+        unsafe { libc::close(dir_fd) };
+        return Err(err);
+    }
+    let mut names = Vec::new();
+    loop {
+        let ent = unsafe { libc::readdir(dirp) };
+        if ent.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*ent).d_name.as_ptr()) };
+        match name.to_str() {
+            Ok(".") | Ok("..") | Err(_) => {}
+            Ok(n) => names.push(n.to_string()),
+        }
+    }
+    unsafe { libc::closedir(dirp) };
+    Ok(names)
+}
+
 /// Rename `old_rel` to `new_rel`, both confined within `root`.
 pub(crate) fn renameat_in_root(root: &Path, old_rel: &str, new_rel: &str) -> Result<(), i32> {
     let (opfd, ob) = parent_dir_in_root(root, old_rel)?;
