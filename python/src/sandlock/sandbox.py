@@ -232,8 +232,9 @@ class Sandbox:
     Most config fields are optional — unset fields mean "no restriction".
     Sandlock's default syscall blocklist is always applied.
 
-    Runtime kwargs (``name``, ``policy_fn``, ``init_fn``, ``work_fn``) have
-    ``metadata={"runtime": True}`` so serializers can skip them.
+    Runtime kwargs (``name``, ``image``, ``policy_fn``, ``init_fn``,
+    ``work_fn``) have ``metadata={"runtime": True}`` so serializers can skip
+    them.
     """
 
     # Filesystem (Landlock)
@@ -420,10 +421,10 @@ class Sandbox:
     chroot: str | None = None
     """Path to chroot into before applying other confinement."""
 
-    image: Image | None = None
+    image: Image | None = field(default=None, metadata={"runtime": True})
     """Run inside a container image from :func:`sandlock.pull_image`.  Its
     env and working directory only fill what ``env`` and ``cwd`` leave
-    unset."""
+    unset.  A runtime kwarg: it names a local cache path, not policy."""
 
     fs_mount: Mapping[str, str] = field(default_factory=dict)
     """Map virtual paths to host directories inside chroot.
