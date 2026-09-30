@@ -140,11 +140,9 @@ struct RunArgs {
     #[arg(short = 'e', long = "exec-shell", value_name = "CMD")]
     exec_shell: Option<String>,
 
-    /// Use a local Docker image as chroot rootfs, given by reference
-    /// (e.g. `python:3.12-slim`, a digest, or an image id). The image
-    /// must already be present in local Docker storage; sandlock never
-    /// pulls from a registry. Requires a running Docker daemon and an
-    /// accessible socket; the run fails early if neither is reachable.
+    /// Use a container image as chroot rootfs: `oci:<dir>[:tag]`,
+    /// `oci-archive:<file>[:tag]`, or `docker-daemon:<ref>` (a bare
+    /// `<ref>` means the same) for an image in the local Docker daemon.
     #[arg(long, value_name = "IMAGE")]
     image: Option<String>,
 
@@ -653,16 +651,12 @@ async fn run_command(args: RunArgs) -> Result<i32> {
     // the shared image cache directly.
     let image_cmd: Option<Vec<String>>;
     if let Some(ref img) = args.image {
-        let rootfs = sandlock_core::image::extract(img, None).await?;
-        builder = builder.chroot(&rootfs).fs_read("/");
+        let image = sandlock_core::image::pull(img, None).await?;
+        builder = builder.chroot(&image.rootfs).fs_read("/");
         if pb.workdir.is_none() {
-            builder = builder.workdir(&rootfs);
+            builder = builder.workdir(&image.rootfs);
         }
-        if args.cmd.is_empty() {
-            image_cmd = Some(sandlock_core::image::inspect_cmd(img).await?);
-        } else {
-            image_cmd = None;
-        }
+        image_cmd = args.cmd.is_empty().then(|| image.config.default_cmd());
     } else {
         image_cmd = None;
     }
