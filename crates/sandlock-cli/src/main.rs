@@ -645,17 +645,10 @@ async fn run_command(args: RunArgs) -> Result<i32> {
     // (format: sandbox-<pid>-<counter>). Let core handle it when name is None.
     let sandbox_name = args.name.clone();
 
-    // Handle --image: extract rootfs, set chroot, get default cmd.
-    // Auto-set workdir to the rootfs path when the user hasn't passed one,
-    // so seccomp COW stages writes in an upper layer instead of mutating
-    // the shared image cache directly.
     let image_cmd: Option<Vec<String>>;
     if let Some(ref img) = args.image {
         let image = sandlock_core::image::pull(img, None).await?;
-        builder = builder.chroot(&image.rootfs).fs_read("/");
-        if pb.workdir.is_none() {
-            builder = builder.workdir(&image.rootfs);
-        }
+        builder = builder.image(&image);
         image_cmd = args.cmd.is_empty().then(|| image.config.default_cmd());
     } else {
         image_cmd = None;

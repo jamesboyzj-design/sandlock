@@ -8,7 +8,7 @@ use bollard::Docker;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
-use super::{blocking, oci, Cache, Image};
+use super::{blocking, oci, unpack, Cache, Image};
 use crate::error::{SandboxRuntimeError, SandlockError};
 
 pub(super) async fn pull(cache: &Cache, name: &str) -> Result<Image, SandlockError> {
@@ -36,10 +36,7 @@ pub(super) async fn pull(cache: &Cache, name: &str) -> Result<Image, SandlockErr
                     docker_error(format!("{e} (image save needs Docker 25 or newer)"))
                 })?;
                 let manifest = oci::resolve(&blobs, None)?;
-                cache.get_or_build(&key, |rootfs| {
-                    oci::unpack(&blobs, &manifest, rootfs)?;
-                    oci::config(&blobs, &manifest)
-                })
+                cache.get_or_build(&key, |rootfs| unpack(&blobs, &manifest, rootfs))
             })
             .await
         }

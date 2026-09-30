@@ -699,6 +699,24 @@ impl SandboxBuilder {
         self
     }
 
+    /// Run inside `image`. Its Env and WorkingDir only fill what the caller
+    /// has not set, so explicit settings win whichever order they come in.
+    pub fn image(mut self, image: &crate::image::Image) -> Self {
+        self.chroot = Some(image.rootfs.clone());
+        self.fs_readable.push("/".into());
+        // COW keeps the shared image cache from being written through.
+        self.workdir.get_or_insert_with(|| image.rootfs.clone());
+        for var in &image.config.env {
+            if let Some((key, value)) = var.split_once('=') {
+                self.env.entry(key.to_string()).or_insert_with(|| value.to_string());
+            }
+        }
+        if let Some(dir) = &image.config.working_dir {
+            self.cwd.get_or_insert_with(|| dir.into());
+        }
+        self
+    }
+
 
     pub fn gpu_devices(mut self, devices: Vec<u32>) -> Self {
         self.gpu_devices = Some(devices);

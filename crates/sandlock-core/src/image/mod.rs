@@ -116,10 +116,37 @@ fn split_tag(rest: &str) -> (PathBuf, Option<String>) {
 
 fn from_layout(cache: &Cache, blobs: &dyn oci::Blobs, tag: Option<&str>) -> Result<Image, SandlockError> {
     let manifest = oci::resolve(blobs, tag)?;
-    cache.get_or_build(oci::digest_hex(&manifest.config.digest)?, |rootfs| {
-        oci::unpack(blobs, &manifest, rootfs)?;
-        oci::config(blobs, &manifest)
-    })
+    cache.get_or_build(oci::digest_hex(&manifest.config.digest)?, |rootfs| unpack(blobs, &manifest, rootfs))
+}
+
+fn unpack(blobs: &dyn oci::Blobs, manifest: &oci::Manifest, rootfs: &Path) -> Result<ImageConfig, SandlockError> {
+    oci::unpack(blobs, manifest, rootfs)?;
+    let mut config = oci::config(blobs, manifest)?;
+    if let Some(dir) = config.working_dir.take() {
+        config.working_dir = Some(resolve_working_dir(rootfs, &dir)?);
+    }
+    Ok(config)
+}
+
+/// Create WorkingDir if missing, as Docker does, and pin it to its
+/// symlink-free path inside the rootfs: the child chdirs to a host path
+/// joined from it, so a symlink in the image could otherwise start the
+/// sandbox outside its rootfs.
+fn resolve_working_dir(rootfs: &Path, dir: &str) -> Result<String, SandlockError> {
+    use crate::sys::fs::{mkdirp_in_root, openat2_in_root};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let fail = |e: io::Error| SandboxRuntimeError::Child(format!("image: WorkingDir {dir}: {e}"));
+    mkdirp_in_root(rootfs, dir, 0o755).map_err(|e| fail(io::Error::from_raw_os_error(e)))?;
+    let fd = openat2_in_root(rootfs, dir, libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC, 0)
+        .map_err(|e| fail(io::Error::from_raw_os_error(e)))?;
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let real = fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())).map_err(fail)?;
+    let root = fs::canonicalize(rootfs).map_err(fail)?;
+    let inside = real
+        .strip_prefix(&root)
+        .map_err(|_| fail(io::Error::other("resolves outside the rootfs")))?;
+    Ok(format!("/{}", inside.display()))
 }
 
 async fn blocking<T: Send + 'static>(
@@ -285,6 +312,47 @@ mod tests {
         assert_eq!(second.config, first.config);
         let entries: Vec<_> = fs::read_dir(cache.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(entries.len(), 1, "no temp dirs left behind: {entries:?}");
+    }
+
+    #[test]
+    fn builder_image_only_fills_unset_env_and_cwd() {
+        let image = Image {
+            rootfs: "/cache/img/rootfs".into(),
+            config: ImageConfig {
+                env: vec!["PATH=/usr/local/bin:/usr/bin".into(), "LANG=C.UTF-8".into(), "NOEQUALS".into()],
+                working_dir: Some("/srv".into()),
+                ..Default::default()
+            },
+        };
+        let b = crate::SandboxBuilder::default().env_var("LANG", "en_US.UTF-8").image(&image);
+        assert_eq!(b.env["PATH"], "/usr/local/bin:/usr/bin");
+        assert_eq!(b.env["LANG"], "en_US.UTF-8");
+        assert!(!b.env.contains_key("NOEQUALS"));
+        assert_eq!(b.cwd.as_deref(), Some(Path::new("/srv")));
+        assert_eq!(b.chroot.as_deref(), Some(image.rootfs.as_path()));
+        assert_eq!(b.workdir.as_deref(), Some(image.rootfs.as_path()));
+
+        let b = crate::SandboxBuilder::default().image(&image).cwd("/tmp").env_var("PATH", "/bin");
+        assert_eq!(b.cwd.as_deref(), Some(Path::new("/tmp")));
+        assert_eq!(b.env["PATH"], "/bin");
+    }
+
+    #[test]
+    fn working_dir_is_created_and_pinned_inside_rootfs() {
+        let outside = tempfile::tempdir().unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+        let r = rootfs.path();
+        fs::create_dir_all(r.join("usr/src")).unwrap();
+        std::os::unix::fs::symlink("/usr/src", r.join("app")).unwrap();
+        std::os::unix::fs::symlink("../../../../../../..", r.join("up")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), r.join("out")).unwrap();
+
+        assert_eq!(resolve_working_dir(r, "/work/dir").unwrap(), "/work/dir");
+        assert!(r.join("work/dir").is_dir());
+        assert_eq!(resolve_working_dir(r, "/app/proj").unwrap(), "/usr/src/proj");
+        assert_eq!(resolve_working_dir(r, "/up").unwrap(), "/");
+        let _ = resolve_working_dir(r, "/out/x");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[test]
