@@ -70,7 +70,8 @@ async fn download_and_unpack(
     .await
 }
 
-/// A parsed image reference, following Docker's normalization rules.
+/// A parsed `docker://` reference (without the transport), normalized as
+/// Docker and skopeo do.
 #[derive(Debug, PartialEq)]
 pub(super) struct Reference {
     registry: String,
@@ -82,18 +83,20 @@ pub(super) struct Reference {
 impl Reference {
     pub fn parse(input: &str) -> Result<Self, SandlockError> {
         let bad = |why: &str| registry_error(format!("invalid image reference {input:?}: {why}"));
-        let s = input.strip_prefix("docker://").unwrap_or(input);
-        let (name, digest) = match s.split_once('@') {
+        let (name, digest) = match input.split_once('@') {
             Some((name, digest)) => {
                 oci::digest_hex(digest)?;
                 (name, Some(digest))
             }
-            None => (s, None),
+            None => (input, None),
         };
         let (name, tag) = match name.rsplit_once(':') {
             Some((n, t)) if !t.contains('/') => (n, Some(t)),
             _ => (name, None),
         };
+        if tag.is_some() && digest.is_some() {
+            return Err(bad("a tag and a digest together are ambiguous; use one"));
+        }
         let (registry, repository) = match name.split_once('/') {
             Some((host, rest)) if host.contains(['.', ':']) || host == "localhost" => (host, rest.to_string()),
             _ => ("docker.io", name.to_string()),
@@ -475,12 +478,13 @@ mod tests {
         let t = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
         assert_eq!(parsed("ubuntu"), t("docker.io", "library/ubuntu", "latest"));
         assert_eq!(parsed("python:3.12-slim"), t("docker.io", "library/python", "3.12-slim"));
-        assert_eq!(parsed("docker://bitnami/redis:7"), t("docker.io", "bitnami/redis", "7"));
+        assert_eq!(parsed("bitnami/redis:7"), t("docker.io", "bitnami/redis", "7"));
         assert_eq!(parsed("index.docker.io/library/alpine"), t("docker.io", "library/alpine", "latest"));
         assert_eq!(parsed("ghcr.io/org/tool:v1"), t("ghcr.io", "org/tool", "v1"));
         assert_eq!(parsed("localhost:5000/img"), t("localhost:5000", "img", "latest"));
         let digest = format!("sha256:{}", "a".repeat(64));
-        assert_eq!(parsed(&format!("ghcr.io/o/i:v1@{digest}")), t("ghcr.io", "o/i", &digest));
+        assert_eq!(parsed(&format!("ghcr.io/o/i@{digest}")), t("ghcr.io", "o/i", &digest));
+        assert!(Reference::parse(&format!("ghcr.io/o/i:v1@{digest}")).is_err());
         assert!(Reference::parse("Ubuntu").is_err());
         assert!(Reference::parse("ubuntu@sha256:short").is_err());
         assert!(Reference::parse("ubuntu:bad/tag?").is_err());

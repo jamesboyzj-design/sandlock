@@ -1,12 +1,13 @@
 //! Materialize a container image into a cached rootfs for sandboxing.
 //!
-//! References use skopeo's transport syntax:
+//! References follow skopeo's transport syntax (containers-transports(5)),
+//! and like skopeo require the transport:
 //!
+//! - `docker://<ref>`: a registry, Docker Hub by default
+//! - `docker-daemon:<ref>` or `docker-daemon:sha256:<id>`: an image in the
+//!   local Docker daemon, fetched through its image-save API (Docker 25+)
 //! - `oci:<dir>[:<tag>]`: an OCI image layout directory
 //! - `oci-archive:<file>[:<tag>]`: a tar of an OCI image layout
-//! - `docker://<ref>` or a bare `<ref>`: a registry, Docker Hub by default
-//! - `docker-daemon:<ref>`: an image in the local Docker daemon, fetched
-//!   through its image-save API (Docker 25+)
 //!
 //! Every blob is checked against its digest, layers are applied without
 //! privileges (see [`layer`]), and each image is unpacked once into
@@ -15,7 +16,7 @@
 //! compression, so one image is cached once.
 //!
 //! ```ignore
-//! let image = image::pull("oci:/srv/images/python:3.12", None).await?;
+//! let image = image::pull("docker://python:3.12", None).await?;
 //! let cmd = image.config.default_cmd();
 //! ```
 
@@ -99,13 +100,17 @@ impl Source {
         } else if let Some(rest) = reference.strip_prefix("oci-archive:") {
             let (path, tag) = split_tag(rest);
             Ok(Source::OciArchive { path, tag })
-        } else if let Some(name) = reference.strip_prefix("docker-daemon:") {
-            if name.is_empty() {
-                return Err(SandboxRuntimeError::Child("empty image reference".into()).into());
-            }
+        } else if let Some(name) = reference.strip_prefix("docker-daemon:").filter(|n| !n.is_empty()) {
             Ok(Source::DockerDaemon(name.to_string()))
+        } else if let Some(name) = reference.strip_prefix("docker://").filter(|n| !n.is_empty()) {
+            Ok(Source::Registry(name.to_string()))
         } else {
-            Ok(Source::Registry(reference.to_string()))
+            Err(SandboxRuntimeError::Child(format!(
+                "image reference {reference:?} needs a transport, as with skopeo: \
+                 docker://{reference} for a registry, docker-daemon:{reference} for \
+                 the local Docker daemon, oci:<dir> or oci-archive:<file>"
+            ))
+            .into())
         }
     }
 }
@@ -279,9 +284,15 @@ mod tests {
             Source::parse("docker-daemon:python:3.12").unwrap(),
             Source::DockerDaemon("python:3.12".into())
         );
-        assert_eq!(Source::parse("python:3.12").unwrap(), Source::Registry("python:3.12".into()));
-        assert_eq!(Source::parse("docker://ghcr.io/a/b").unwrap(), Source::Registry("docker://ghcr.io/a/b".into()));
+        assert_eq!(
+            Source::parse("docker-daemon:sha256:abc").unwrap(),
+            Source::DockerDaemon("sha256:abc".into())
+        );
+        assert_eq!(Source::parse("docker://ghcr.io/a/b").unwrap(), Source::Registry("ghcr.io/a/b".into()));
+        let err = Source::parse("python:3.12").unwrap_err().to_string();
+        assert!(err.contains("docker://python:3.12") && err.contains("docker-daemon:python:3.12"), "{err}");
         assert!(Source::parse("docker-daemon:").is_err());
+        assert!(Source::parse("docker://").is_err());
     }
 
     fn one_layer_layout(file: &str) -> TestLayout {
