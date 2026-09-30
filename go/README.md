@@ -161,9 +161,16 @@ func PullImage(reference, cacheDir string) (*Image, error)
 
 `PullImage` fetches and unpacks a container image without a Docker daemon or
 root, and returns it as plain data. Setting `Sandbox.Image` runs inside it:
-the image's rootfs becomes the chroot with a copy-on-write layer over it,
-read access to `/` inside the image is granted, and its `Env` and
-`WorkingDir` fill only what `Env` and `Cwd` leave unset.
+the image's rootfs becomes the chroot, read access to `/` inside it is
+granted, and its `Env` and `WorkingDir` fill only what `Env` and `Cwd` leave
+unset.
+
+Like a container's writable layer, every write lands in a copy-on-write
+branch that is discarded when the run ends, so the cached image never
+changes. To keep output, mount a host directory with `FSMount` and grant it
+in `FSWritable`; setting `Workdir`, or an `OnExit`/`OnError` other than
+`BranchActionAbort`, is rejected. The cache belongs to the invoking user, so
+it is only as protected as that user's other files.
 
 | Reference | Source |
 |---|---|

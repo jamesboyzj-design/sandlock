@@ -184,9 +184,16 @@ sandbox = Sandbox(
 
 `sandlock.pull_image(reference, cache_dir=None) -> Image` fetches and unpacks
 a container image without a Docker daemon or root. `Sandbox(image=...)` runs
-inside it: the image's rootfs becomes the chroot with a copy-on-write layer
-over it, read access to `/` inside the image is granted, and its env and
-working directory fill only what `env` and `cwd` leave unset.
+inside it: the image's rootfs becomes the chroot, read access to `/` inside it
+is granted, and its env and working directory fill only what `env` and `cwd`
+leave unset.
+
+Like a container's writable layer, every write lands in a copy-on-write
+branch that is discarded when the run ends, so the cached image never
+changes. To keep output, mount a host directory with `fs_mount` and grant it
+in `fs_writable`; setting `workdir`, or an `on_error` other than `"abort"`,
+is rejected, and `on_exit` is always abort. The cache belongs to the
+invoking user, so it is only as protected as that user's other files.
 
 | Reference | Source |
 |-----------|--------|
@@ -200,6 +207,11 @@ from sandlock import Sandbox, pull_image
 
 image = pull_image("python:3.12-slim")
 result = Sandbox(image=image, max_memory="512M").run(["python3", "-c", "print('hello')"])
+
+# Keep output on the host; writes elsewhere are discarded.
+Sandbox(image=image, fs_mount={"/out": "/srv/job-1"}, fs_writable=["/out"]).run(
+    ["python3", "-c", "open('/out/result.txt', 'w').write('done')"]
+)
 
 # Or the image's own command:
 Sandbox(image=image).run(image.config.default_cmd())
