@@ -344,6 +344,33 @@ mod tests {
     }
 
     #[test]
+    fn image_writes_are_always_discarded() {
+        use crate::sandbox::BranchAction;
+        let rootfs = tempfile::tempdir().unwrap();
+        let image = Image { rootfs: rootfs.path().to_path_buf(), config: ImageConfig::default() };
+        let build = |b: crate::SandboxBuilder| b.build();
+
+        let sb = build(crate::SandboxBuilder::default().image(&image)).unwrap();
+        assert_eq!(sb.on_exit, BranchAction::Abort);
+        assert_eq!(sb.on_error, BranchAction::Abort);
+        assert_eq!(sb.workdir.as_deref(), Some(rootfs.path()));
+
+        let explicit = crate::SandboxBuilder::default().on_exit(BranchAction::Abort).image(&image);
+        assert!(build(explicit).is_ok());
+
+        let other = tempfile::tempdir().unwrap();
+        let err = build(crate::SandboxBuilder::default().workdir(other.path()).image(&image)).unwrap_err();
+        assert!(err.to_string().contains("copy-on-write root"), "{err}");
+
+        for action in [BranchAction::Commit, BranchAction::Keep] {
+            let err = build(crate::SandboxBuilder::default().image(&image).on_exit(action.clone())).unwrap_err();
+            assert!(err.to_string().contains("on_exit must be abort"), "{err}");
+            let err = build(crate::SandboxBuilder::default().on_error(action).image(&image)).unwrap_err();
+            assert!(err.to_string().contains("on_error must be abort"), "{err}");
+        }
+    }
+
+    #[test]
     fn working_dir_is_created_and_pinned_inside_rootfs() {
         let outside = tempfile::tempdir().unwrap();
         let rootfs = tempfile::tempdir().unwrap();
