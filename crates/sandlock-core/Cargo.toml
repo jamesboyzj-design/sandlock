@@ -36,6 +36,7 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["ring",
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ruzstd = "0.9"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"], optional = true }
 bollard = "0.21"
 futures-util = "0.3"

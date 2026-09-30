@@ -4,8 +4,9 @@
 //!
 //! - `oci:<dir>[:<tag>]`: an OCI image layout directory
 //! - `oci-archive:<file>[:<tag>]`: a tar of an OCI image layout
-//! - `docker-daemon:<ref>` or a bare `<ref>`: an image in the local Docker
-//!   daemon, fetched through its image-save API (Docker 25+)
+//! - `docker://<ref>` or a bare `<ref>`: a registry, Docker Hub by default
+//! - `docker-daemon:<ref>`: an image in the local Docker daemon, fetched
+//!   through its image-save API (Docker 25+)
 //!
 //! Every blob is checked against its digest, layers are applied without
 //! privileges (see [`layer`]), and each image is unpacked once into
@@ -29,6 +30,7 @@ use crate::error::{SandboxRuntimeError, SandlockError};
 mod docker;
 mod layer;
 mod oci;
+mod registry;
 
 /// An unpacked image: its root filesystem and how it expects to be run.
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ impl ImageConfig {
 pub async fn pull(reference: &str, cache_dir: Option<&Path>) -> Result<Image, SandlockError> {
     let cache = Cache::new(cache_dir);
     match Source::parse(reference)? {
+        Source::Registry(name) => registry::pull(&cache, &name).await,
         Source::DockerDaemon(name) => docker::pull(&cache, &name).await,
         Source::OciDir { path, tag } => {
             blocking(move || {
@@ -84,6 +87,7 @@ pub async fn pull(reference: &str, cache_dir: Option<&Path>) -> Result<Image, Sa
 enum Source {
     OciDir { path: PathBuf, tag: Option<String> },
     OciArchive { path: PathBuf, tag: Option<String> },
+    Registry(String),
     DockerDaemon(String),
 }
 
@@ -95,12 +99,13 @@ impl Source {
         } else if let Some(rest) = reference.strip_prefix("oci-archive:") {
             let (path, tag) = split_tag(rest);
             Ok(Source::OciArchive { path, tag })
-        } else {
-            let name = reference.strip_prefix("docker-daemon:").unwrap_or(reference);
+        } else if let Some(name) = reference.strip_prefix("docker-daemon:") {
             if name.is_empty() {
                 return Err(SandboxRuntimeError::Child("empty image reference".into()).into());
             }
             Ok(Source::DockerDaemon(name.to_string()))
+        } else {
+            Ok(Source::Registry(reference.to_string()))
         }
     }
 }
@@ -274,7 +279,8 @@ mod tests {
             Source::parse("docker-daemon:python:3.12").unwrap(),
             Source::DockerDaemon("python:3.12".into())
         );
-        assert_eq!(Source::parse("python:3.12").unwrap(), Source::DockerDaemon("python:3.12".into()));
+        assert_eq!(Source::parse("python:3.12").unwrap(), Source::Registry("python:3.12".into()));
+        assert_eq!(Source::parse("docker://ghcr.io/a/b").unwrap(), Source::Registry("docker://ghcr.io/a/b".into()));
         assert!(Source::parse("docker-daemon:").is_err());
     }
 

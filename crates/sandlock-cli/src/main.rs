@@ -140,9 +140,10 @@ struct RunArgs {
     #[arg(short = 'e', long = "exec-shell", value_name = "CMD")]
     exec_shell: Option<String>,
 
-    /// Use a container image as chroot rootfs: `oci:<dir>[:tag]`,
-    /// `oci-archive:<file>[:tag]`, or `docker-daemon:<ref>` (a bare
-    /// `<ref>` means the same) for an image in the local Docker daemon.
+    /// Use a container image as chroot rootfs: a registry reference
+    /// (`python:3.12`, `docker://ghcr.io/org/img@sha256:...`),
+    /// `oci:<dir>[:tag]`, `oci-archive:<file>[:tag]`, or
+    /// `docker-daemon:<ref>` for an image in the local Docker daemon.
     #[arg(long, value_name = "IMAGE")]
     image: Option<String>,
 

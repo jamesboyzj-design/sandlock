@@ -1428,6 +1428,7 @@ dependencies = [
 name = "sandlock-core"
 version = "0.8.9"
 dependencies = [
+ "base64",
  "bincode",
  "bollard",
  "clap",

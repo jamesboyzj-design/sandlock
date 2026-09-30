@@ -14,7 +14,7 @@ use crate::error::{SandboxRuntimeError, SandlockError};
 
 const REF_NAME: &str = "org.opencontainers.image.ref.name";
 // Index and manifest JSON is read into memory; real ones are a few KiB.
-const MAX_JSON_BLOB: u64 = 4 << 20;
+pub(super) const MAX_JSON_BLOB: u64 = 4 << 20;
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +95,19 @@ impl Blobs for LayoutDir {
     }
 }
 
+/// A bare directory of blobs named by their sha256 hex.
+pub(super) struct BlobDir(pub PathBuf);
+
+impl Blobs for BlobDir {
+    fn index(&self) -> io::Result<Vec<u8>> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "a blob directory has no index"))
+    }
+
+    fn open(&self, hex: &str) -> io::Result<Box<dyn Read + '_>> {
+        Ok(Box::new(File::open(self.0.join(hex))?))
+    }
+}
+
 /// A tar of an OCI image layout, read in place: one scan records where
 /// each member lives, and blobs are then served by seeking.
 pub(super) struct LayoutArchive {
@@ -152,8 +165,9 @@ impl Blobs for LayoutArchive {
 /// through nested indexes. `tag` selects by `org.opencontainers.image.ref.name`.
 pub(super) fn resolve(blobs: &dyn Blobs, tag: Option<&str>) -> Result<Manifest, SandlockError> {
     let index = blobs.index().map_err(|e| oci_error(format!("index.json: {e}")))?;
-    let index: Node = parse_json(&index, "index.json")?;
-    let mut candidates = index.manifests.unwrap_or_default();
+    let Parsed::Index(mut candidates) = parse_node(&index, "index.json")? else {
+        return Err(oci_error("index.json is not an index".into()));
+    };
     if let Some(tag) = tag {
         candidates.retain(|d| d.annotations.get(REF_NAME).map(String::as_str) == Some(tag));
         if candidates.is_empty() {
@@ -162,16 +176,28 @@ pub(super) fn resolve(blobs: &dyn Blobs, tag: Option<&str>) -> Result<Manifest, 
     }
     loop {
         let desc = pick_platform(candidates)?;
-        let node: Node = parse_json(&read_json_blob(blobs, &desc)?, &desc.digest)?;
-        match (node.manifests, node.config) {
-            (Some(nested), _) => candidates = nested,
-            (None, Some(config)) => return Ok(Manifest { config, layers: node.layers }),
-            (None, None) => return Err(oci_error(format!("{}: neither an index nor a manifest", desc.digest))),
+        match parse_node(&read_json_blob(blobs, &desc)?, &desc.digest)? {
+            Parsed::Index(nested) => candidates = nested,
+            Parsed::Manifest(manifest) => return Ok(manifest),
         }
     }
 }
 
-fn pick_platform(candidates: Vec<Descriptor>) -> Result<Descriptor, SandlockError> {
+pub(super) enum Parsed {
+    Index(Vec<Descriptor>),
+    Manifest(Manifest),
+}
+
+pub(super) fn parse_node(bytes: &[u8], what: &str) -> Result<Parsed, SandlockError> {
+    let node: Node = parse_json(bytes, what)?;
+    match (node.manifests, node.config) {
+        (Some(manifests), _) => Ok(Parsed::Index(manifests)),
+        (None, Some(config)) => Ok(Parsed::Manifest(Manifest { config, layers: node.layers })),
+        (None, None) => Err(oci_error(format!("{what}: neither an index nor a manifest"))),
+    }
+}
+
+pub(super) fn pick_platform(candidates: Vec<Descriptor>) -> Result<Descriptor, SandlockError> {
     let arch = host_arch();
     let fits = |d: &Descriptor| d.platform.as_ref().is_none_or(|p| p.os == "linux" && p.architecture == arch);
     let offered: Vec<String> = candidates
@@ -181,8 +207,8 @@ fn pick_platform(candidates: Vec<Descriptor>) -> Result<Descriptor, SandlockErro
     let mut fitting = candidates.into_iter().filter(fits);
     match (fitting.next(), fitting.next()) {
         (Some(d), None) => Ok(d),
-        (Some(_), Some(_)) => Err(oci_error("layout holds several images; select one with :<tag>".into())),
-        (None, _) if offered.is_empty() => Err(oci_error("layout index lists no images".into())),
+        (Some(_), Some(_)) => Err(oci_error("several images fit this host; select one with :<tag>".into())),
+        (None, _) if offered.is_empty() => Err(oci_error("index lists no images".into())),
         (None, _) => Err(oci_error(format!("no linux/{arch} image (offered: {})", offered.join(", ")))),
     }
 }
@@ -368,11 +394,11 @@ impl<R: BufRead> Read for ZstdReader<R> {
     }
 }
 
-fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], what: &str) -> Result<T, SandlockError> {
+pub(super) fn parse_json<T: for<'de> Deserialize<'de>>(bytes: &[u8], what: &str) -> Result<T, SandlockError> {
     serde_json::from_slice(bytes).map_err(|e| oci_error(format!("{what}: {e}")))
 }
 
-fn oci_error(msg: String) -> SandlockError {
+pub(super) fn oci_error(msg: String) -> SandlockError {
     SandboxRuntimeError::Child(format!("image: {msg}")).into()
 }
 
@@ -380,6 +406,10 @@ fn oci_error(msg: String) -> SandlockError {
 pub(super) mod tests {
     use super::*;
     use std::fs;
+
+    pub(in crate::image) fn host_arch_for_tests() -> &'static str {
+        host_arch()
+    }
 
     pub(in crate::image) fn sha256_hex(data: &[u8]) -> String {
         ring::digest::digest(&ring::digest::SHA256, data).as_ref().iter().map(|b| format!("{b:02x}")).collect()
