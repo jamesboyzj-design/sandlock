@@ -174,11 +174,13 @@ it is only as protected as that user's other files.
 
 | Reference | Source |
 |---|---|
-| `python:3.12`, `ghcr.io/org/img@sha256:...`, `docker://...` | registry (Docker Hub by default) |
+| `docker://python:3.12`, `docker://ghcr.io/org/img@sha256:...` | registry (Docker Hub by default) |
 | `oci:<dir>[:tag]` | OCI image layout directory |
 | `oci-archive:<file>[:tag]` | tar of an OCI image layout |
-| `docker-daemon:<ref>` | local Docker daemon (Docker 25+) |
+| `docker-daemon:<ref>`, `docker-daemon:sha256:<id>` | local Docker daemon (Docker 25+) |
 
+References use skopeo's transport syntax (containers-transports(5)): the
+transport prefix is required, and a tag together with a digest is rejected.
 Registry credentials come from `docker login`'s `~/.docker/config.json` (or
 `$DOCKER_CONFIG`); credential helpers are not run. Every blob is verified
 against its digest, and each image is unpacked once into `cacheDir`, or
@@ -186,7 +188,7 @@ against its digest, and each image is unpacked once into `cacheDir`, or
 named by digest starts without network access.
 
 ```go
-img, err := sandlock.PullImage("python:3.12-slim", "")
+img, err := sandlock.PullImage("docker://python:3.12-slim", "")
 if err != nil {
 	log.Fatal(err)
 }

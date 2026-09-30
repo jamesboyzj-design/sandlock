@@ -2624,8 +2624,9 @@ pub unsafe extern "C" fn sandlock_checkpoint_save(
     }
 }
 
-/// Pull and unpack a container image (a registry reference, `oci:<dir>`,
-/// `oci-archive:<file>` or `docker-daemon:<ref>`), returning it as JSON
+/// Pull and unpack a container image named with skopeo's transport syntax
+/// (`docker://<ref>`, `docker-daemon:<ref>`, `oci:<dir>[:tag]` or
+/// `oci-archive:<file>[:tag]`), returning it as JSON
 /// `{"rootfs": ..., "config": {"entrypoint", "cmd", "env", "working_dir"}}`
 /// for `sandlock_sandbox_builder_image`. `cache_dir` may be NULL for the
 /// default cache. Returns NULL on error with `*err_msg` set; free either

@@ -197,15 +197,15 @@ invoking user, so it is only as protected as that user's other files.
 
 | Reference | Source |
 |-----------|--------|
-| `python:3.12`, `ghcr.io/org/img@sha256:...`, `docker://...` | registry (Docker Hub by default) |
+| `docker://python:3.12`, `docker://ghcr.io/org/img@sha256:...` | registry (Docker Hub by default) |
 | `oci:<dir>[:tag]` | OCI image layout directory |
 | `oci-archive:<file>[:tag]` | tar of an OCI image layout |
-| `docker-daemon:<ref>` | local Docker daemon (Docker 25+) |
+| `docker-daemon:<ref>`, `docker-daemon:sha256:<id>` | local Docker daemon (Docker 25+) |
 
 ```python
 from sandlock import Sandbox, pull_image
 
-image = pull_image("python:3.12-slim")
+image = pull_image("docker://python:3.12-slim")
 result = Sandbox(image=image, max_memory="512M").run(["python3", "-c", "print('hello')"])
 
 # Keep output on the host; writes elsewhere are discarded.
@@ -219,7 +219,7 @@ Sandbox(image=image).run(image.config.default_cmd())
 
 `Image` has `rootfs` and `config`; `ImageConfig` has `entrypoint`, `cmd`,
 `env` (`KEY=VALUE` strings), `working_dir`, and `default_cmd()`. Both are
-frozen dataclasses. Registry credentials come from `docker login`'s
+frozen dataclasses. References use skopeo's transport syntax (containers-transports(5)): the transport prefix is required, and a tag together with a digest is rejected. Registry credentials come from `docker login`'s
 `~/.docker/config.json` (or `$DOCKER_CONFIG`); credential helpers are not
 run. Every blob is verified against its digest, and each image is unpacked
 once into `cache_dir`, or `$XDG_CACHE_HOME/sandlock/images` by default. A

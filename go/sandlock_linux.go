@@ -751,10 +751,10 @@ func (s *Sandbox) RunInteractive(ctx context.Context, cmd ...string) (int, error
 }
 
 // PullImage fetches and unpacks a container image, reusing the cache when
-// the image is already there. reference is a registry reference such as
-// "python:3.12" or "ghcr.io/org/img@sha256:...", or "oci:<dir>[:tag]",
-// "oci-archive:<file>[:tag]" or "docker-daemon:<ref>". An empty cacheDir
-// selects the default cache.
+// the image is already there. reference uses skopeo's transport syntax:
+// "docker://python:3.12" (registry), "docker-daemon:myapp:dev" (local Docker
+// daemon), "oci:<dir>[:tag]" or "oci-archive:<file>[:tag]". An empty
+// cacheDir selects the default cache.
 func PullImage(reference, cacheDir string) (*Image, error) {
 	if hasNUL(reference) || hasNUL(cacheDir) {
 		return nil, ErrInvalidString

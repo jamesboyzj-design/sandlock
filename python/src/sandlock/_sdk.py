@@ -768,9 +768,9 @@ def pull_image(reference: str, cache_dir: str | os.PathLike | None = None) -> Im
     """Fetch and unpack a container image, reusing the cache when it is
     already there.
 
-    ``reference`` is a registry reference such as ``"python:3.12"`` or
-    ``"ghcr.io/org/img@sha256:..."``, or ``"oci:<dir>[:tag]"``,
-    ``"oci-archive:<file>[:tag]"`` or ``"docker-daemon:<ref>"``.
+    ``reference`` uses skopeo's transport syntax: ``"docker://python:3.12"``
+    (registry), ``"docker-daemon:myapp:dev"`` (local Docker daemon),
+    ``"oci:<dir>[:tag]"`` or ``"oci-archive:<file>[:tag]"``.
     ``cache_dir`` defaults to ``$XDG_CACHE_HOME/sandlock/images``.
     """
     err = ctypes.c_void_p()
