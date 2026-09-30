@@ -8,13 +8,14 @@ use rcgen::{CertificateParams, KeyPair};
 
 /// Pre-generated dummy CA for HTTP-only mode, avoiding per-spawn keygen cost.
 fn dummy_ca() -> std::io::Result<(KeyPair, rcgen::Certificate)> {
-    use rcgen::{BasicConstraints, DnType, IsCa};
+    use rcgen::{BasicConstraints, DnType, IsCa, KeyUsagePurpose};
 
     let kp = KeyPair::generate().map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::Other, format!("keygen failed: {e}"))
     })?;
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     // A distinct subject DN is required: leaf certs minted under this CA must
     // have a subject that differs from their issuer, otherwise an empty-DN leaf
     // looks self-signed (subject == issuer) and clients reject it.

@@ -47,6 +47,9 @@ impl CertSigner {
         // Give the leaf a subject CN distinct from the CA's subject, so the leaf
         // is not mistaken for self-signed (subject == issuer) by clients.
         params.distinguished_name.push(DnType::CommonName, sni);
+        // RFC 5280 4.2.1.1: non-self-signed certificates identify their issuer's
+        // key. OpenSSL strict verification (Python 3.13+) requires this.
+        params.use_authority_key_identifier_extension = true;
         // signed_by(public_key, issuer_cert, issuer_key): leaf public key is the
         // leaf KeyPair (impl PublicKeyData), signed by the CA cert + CA key.
         let leaf = params.signed_by(&leaf_key, &self.ca_cert, &self.ca_key).map_err(|e| {
