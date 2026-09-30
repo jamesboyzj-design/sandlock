@@ -1176,7 +1176,10 @@ class _NativePolicy:
         _action_map = {"commit": 0, "abort": 1, "keep": 2, "defer": 3}
         on_exit_val = policy.on_exit.value if hasattr(policy.on_exit, 'value') else str(policy.on_exit)
         on_error_val = policy.on_error.value if hasattr(policy.on_error, 'value') else str(policy.on_error)
-        b = _b_on_exit(b, _action_map.get(on_exit_val, 0))
+        # An image's writes are always discarded, and the native build rejects
+        # any other exit action, so leave the COMMIT default unsent for it.
+        if policy.image is None or on_exit_val != "commit":
+            b = _b_on_exit(b, _action_map.get(on_exit_val, 0))
         b = _b_on_error(b, _action_map.get(on_error_val, 1))
 
         if policy.max_memory is not None:

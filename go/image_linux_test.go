@@ -108,6 +108,30 @@ func TestPullImageAndRunInIt(t *testing.T) {
 	}
 }
 
+func TestImageWritesAreDiscarded(t *testing.T) {
+	requireLandlock(t)
+	layout := t.TempDir()
+	writeHelperImage(t, layout)
+	img, err := sandlock.PullImage("oci:"+layout, t.TempDir())
+	if err != nil {
+		t.Fatalf("PullImage: %v", err)
+	}
+
+	sb := &sandlock.Sandbox{Image: img, FSWritable: []string{"/tmp"}}
+	res, err := sb.Run(context.Background(), "rootfs-helper", "write", "/tmp/f", "x")
+	if err != nil || !res.Success {
+		t.Fatalf("write in image: err=%v res=%+v", err, res)
+	}
+	if _, err := os.Stat(filepath.Join(img.Rootfs, "tmp/f")); !os.IsNotExist(err) {
+		t.Fatalf("a run changed the cached image: %v", err)
+	}
+
+	sb = &sandlock.Sandbox{Image: img, OnExit: sandlock.BranchActionCommit}
+	if _, err := sb.Run(context.Background(), "rootfs-helper", "pwd"); err == nil || !strings.Contains(err.Error(), "on_exit must be abort") {
+		t.Fatalf("OnExit commit with an image: err=%v", err)
+	}
+}
+
 func TestPullImageReportsFailure(t *testing.T) {
 	_, err := sandlock.PullImage("oci:/nonexistent/layout", t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "not an OCI image layout") {

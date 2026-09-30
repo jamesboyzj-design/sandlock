@@ -71,6 +71,19 @@ def test_pull_image_and_run_in_it(tmp_path):
     assert result.stdout.strip() == b"/tmp", "an explicit cwd must win over the image's"
 
 
+def test_image_writes_are_discarded(tmp_path):
+    layout = tmp_path / "layout"
+    _write_helper_image(layout)
+    image = pull_image(f"oci:{layout}", cache_dir=tmp_path / "cache")
+
+    result = Sandbox(image=image, fs_writable=["/tmp"]).run(["rootfs-helper", "write", "/tmp/f", "x"])
+    assert result.success, result.stderr
+    assert not (Path(image.rootfs) / "tmp/f").exists(), "a run must never change the cached image"
+
+    with pytest.raises(RuntimeError, match="on_error must be abort"):
+        Sandbox(image=image, on_error="commit").run(["rootfs-helper", "pwd"])
+
+
 def test_pull_image_reports_failure(tmp_path):
     with pytest.raises(SandlockError, match="not an OCI image layout"):
         pull_image("oci:/nonexistent/layout", cache_dir=tmp_path)
