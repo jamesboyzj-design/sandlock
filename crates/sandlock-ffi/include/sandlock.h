@@ -1334,6 +1334,24 @@ int sandlock_checkpoint_save(const sandlock_checkpoint_t *cp, const char *dir);
 char *sandlock_image_pull(const char *reference, const char *cache_dir, char **err_msg);
 
 /**
+ * Parse a TOML profile with the core parser, the one the CLI uses, and
+ * return it as JSON keyed by `Sandbox` field names: `${HOME}` expanded,
+ * mount specs split into `fs_mount` and `fs_mount_ro` objects, and every
+ * value already validated. Returns NULL on error with `*err_msg` set; free
+ * either string with `sandlock_string_free`.
+ *
+ * # Safety
+ * `toml` must be a valid C string; `err_msg` a valid pointer or NULL.
+ */
+char *sandlock_profile_resolve(const char *toml, char **err_msg);
+
+/**
+ * The directory named profiles are loaded from, as the CLI resolves it.
+ * Free with `sandlock_string_free`.
+ */
+char *sandlock_profile_dir(void);
+
+/**
  * Load a checkpoint from a directory.
  * Returns NULL on error.
  *
