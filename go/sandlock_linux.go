@@ -142,9 +142,11 @@ func (s *Sandbox) validateStrings() error {
 			}
 		}
 	}
-	for k, v := range s.FSMount {
-		if hasNUL(k) || hasNUL(v) {
-			return ErrInvalidString
+	for _, m := range []map[string]string{s.FSMount, s.FSMountRO} {
+		for k, v := range m {
+			if hasNUL(k) || hasNUL(v) {
+				return ErrInvalidString
+			}
 		}
 	}
 	for k, v := range s.Env {
@@ -222,6 +224,12 @@ func (s *Sandbox) buildPolicy() (*C.sandlock_sandbox_t, error) {
 	for vp, hp := range s.FSMount {
 		cv, ch := C.CString(vp), C.CString(hp)
 		b = C.sandlock_sandbox_builder_fs_mount(b, cv, ch)
+		C.free(unsafe.Pointer(cv))
+		C.free(unsafe.Pointer(ch))
+	}
+	for vp, hp := range s.FSMountRO {
+		cv, ch := C.CString(vp), C.CString(hp)
+		b = C.sandlock_sandbox_builder_fs_mount_ro(b, cv, ch)
 		C.free(unsafe.Pointer(cv))
 		C.free(unsafe.Pointer(ch))
 	}

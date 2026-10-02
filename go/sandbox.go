@@ -193,6 +193,10 @@ type Sandbox struct {
 	// like a bind mount without kernel mounts or root.
 	FSMount map[string]string
 
+	// FSMountRO is FSMount for mounts whose writes fail with EACCES. A
+	// virtual path may not appear in both maps.
+	FSMountRO map[string]string
+
 	// Image runs the sandbox inside a container image from PullImage. Its
 	// Env and WorkingDir only fill what Env and Cwd leave unset.
 	Image *Image
