@@ -327,7 +327,7 @@ _lib.sandlock_profile_resolve.restype = ctypes.c_void_p
 _lib.sandlock_profile_resolve.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
 
 _lib.sandlock_profile_dir.restype = ctypes.c_void_p
-_lib.sandlock_profile_dir.argtypes = []
+_lib.sandlock_profile_dir.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
 
 _lib.sandlock_handle_upper_dir.restype = ctypes.c_void_p
 _lib.sandlock_handle_upper_dir.argtypes = [_c_handle_p]
@@ -812,7 +812,12 @@ def resolve_profile(text: str) -> dict:
 
 
 def profile_dir() -> str:
-    return _take_string(_lib.sandlock_profile_dir())
+    """Directory of named profiles; raises ValueError without a usable home."""
+    err = ctypes.c_void_p()
+    out = _lib.sandlock_profile_dir(ctypes.byref(err))
+    if not out:
+        raise ValueError(_take_string(err.value) or "no profile directory")
+    return _take_string(out)
 
 
 def _image_to_json(image: Image) -> str:

@@ -279,13 +279,17 @@ class TestLoadProfilePath:
 class TestProfilesDir:
     @pytest.fixture
     def config_home(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-        directory = tmp_path / "sandlock" / "profiles"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        directory = tmp_path / ".config" / "sandlock" / "profiles"
         directory.mkdir(parents=True)
         return directory
 
-    def test_honours_xdg_config_home(self, config_home):
+    def test_lives_under_home(self, config_home):
         # The CLI resolves the directory this way, so both must agree.
+        assert profiles_dir() == config_home
+
+    def test_xdg_config_home_is_not_consulted(self, config_home, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
         assert profiles_dir() == config_home
 
     def test_list_profiles(self, config_home):
@@ -298,7 +302,7 @@ class TestProfilesDir:
         assert list_profiles() == []
 
     def test_list_profiles_no_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nonexistent"))
+        monkeypatch.setenv("HOME", str(tmp_path))
         assert list_profiles() == []
 
     def test_load_profile_by_name(self, config_home):

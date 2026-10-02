@@ -80,10 +80,11 @@ func TestParseProfileRefusesFieldsGoCannotExpress(t *testing.T) {
 
 func TestProfileDirAndListing(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", home)
-	dir := filepath.Join(home, "sandlock", "profiles")
-	if got := sandlock.ProfileDir(); got != dir {
-		t.Fatalf("ProfileDir() = %q, want %q", got, dir)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "elsewhere"))
+	dir := filepath.Join(home, ".config", "sandlock", "profiles")
+	if got, err := sandlock.ProfileDir(); err != nil || got != dir {
+		t.Fatalf("ProfileDir() = %q, %v, want %q", got, err, dir)
 	}
 	if names, err := sandlock.ListProfiles(); err != nil || names != nil {
 		t.Fatalf("missing dir: got %v, %v", names, err)

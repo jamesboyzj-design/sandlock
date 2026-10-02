@@ -19,10 +19,13 @@ from .sandbox import BranchAction, Sandbox
 
 
 def profiles_dir() -> Path:
-    """Return the profiles directory path."""
+    """Return ``~/.config/sandlock/profiles``, the profiles directory path."""
     from ._sdk import profile_dir
 
-    return Path(profile_dir())
+    try:
+        return Path(profile_dir())
+    except ValueError as e:
+        raise PolicyError(str(e)) from None
 
 
 def list_profiles() -> list[str]:

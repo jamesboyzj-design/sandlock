@@ -200,8 +200,8 @@ res, _ := sb.Run(ctx, "python3", "-c", "print('hello')")
 ### Profiles
 
 TOML profiles are parsed by sandlock's own parser, the one the CLI uses, so a
-profile means the same thing to both. Named profiles live in `ProfileDir()`
-(`$XDG_CONFIG_HOME/sandlock/profiles`, default `~/.config/sandlock/profiles`).
+profile means the same thing to both. Named profiles live in
+`~/.config/sandlock/profiles` (`ProfileDir()`).
 
 ```go
 sb, err := sandlock.LoadProfile("build")        // or LoadProfileFile(path), ParseProfile(text)

@@ -783,19 +783,10 @@ pub fn sandbox_to_json(s: &Sandbox, extra_denied: &[String]) -> Result<String, S
     )))
 }
 
-/// Default profile directory.
-pub fn profile_dir() -> PathBuf {
-    dirs_or_fallback().join("profiles")
-}
-
-fn dirs_or_fallback() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".config")
-        })
-        .join("sandlock")
+/// Named profiles live only under the user's home, resolved as `${HOME}` is
+/// inside profiles, so policy is never read from a shared or relative path.
+pub fn profile_dir() -> Result<PathBuf, SandlockError> {
+    Ok(PathBuf::from(crate::expand::resolve_home()?).join(".config/sandlock/profiles"))
 }
 
 fn parse_toml(content: &str) -> Result<ProfileInput, SandlockError> {
@@ -820,7 +811,7 @@ pub fn resolve_profile(content: &str) -> Result<ResolvedProfile, SandlockError> 
 
 /// Load a profile by name.
 pub fn load_profile(name: &str) -> Result<(Sandbox, ProgramSpec), SandlockError> {
-    let path = profile_dir().join(format!("{}.toml", name));
+    let path = profile_dir()?.join(format!("{}.toml", name));
     let content = std::fs::read_to_string(&path)
         .map_err(|e| SandlockError::Sandbox(crate::error::SandboxError::Invalid(
             format!("profile '{}': {}", name, e),
@@ -830,7 +821,7 @@ pub fn load_profile(name: &str) -> Result<(Sandbox, ProgramSpec), SandlockError>
 
 /// List available profile names.
 pub fn list_profiles() -> Result<Vec<String>, SandlockError> {
-    let dir = profile_dir();
+    let dir = profile_dir()?;
     if !dir.exists() { return Ok(Vec::new()); }
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&dir)
@@ -982,12 +973,12 @@ mod tests {
     }
 
     #[test]
-    fn list_profiles_empty_dir() {
-        // With no profile dir, list_profiles() should return an empty vec.
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/sandlock-test-nonexistent");
-        let profiles = list_profiles().unwrap();
-        assert!(profiles.is_empty());
-        std::env::remove_var("XDG_CONFIG_HOME");
+    fn profile_dir_is_under_home() {
+        let home = crate::expand::resolve_home().unwrap();
+        assert_eq!(
+            profile_dir().unwrap(),
+            PathBuf::from(home).join(".config/sandlock/profiles")
+        );
     }
 
     #[test]

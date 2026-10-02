@@ -1347,9 +1347,13 @@ char *sandlock_profile_resolve(const char *toml, char **err_msg);
 
 /**
  * The directory named profiles are loaded from, as the CLI resolves it.
- * Free with `sandlock_string_free`.
+ * Returns NULL when no usable home directory exists, with `*err_msg` set;
+ * free either string with `sandlock_string_free`.
+ *
+ * # Safety
+ * `err_msg` must be a valid pointer or NULL.
  */
-char *sandlock_profile_dir(void);
+char *sandlock_profile_dir(char **err_msg);
 
 /**
  * Load a checkpoint from a directory.

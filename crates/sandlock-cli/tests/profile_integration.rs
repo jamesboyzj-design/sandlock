@@ -105,8 +105,7 @@ fn missing_exec_and_no_trailing_command_is_error() {
 #[test]
 fn profile_by_name_loads_program_section() {
     let tmp = tempfile::tempdir().unwrap();
-    // Sandlock's profile_dir() honors XDG_CONFIG_HOME if set.
-    let profiles_dir = tmp.path().join("sandlock").join("profiles");
+    let profiles_dir = tmp.path().join(".config/sandlock/profiles");
     std::fs::create_dir_all(&profiles_dir).unwrap();
     let profile_path = profiles_dir.join("by-name-test.toml");
     std::fs::write(&profile_path, format!(r#"
@@ -118,7 +117,7 @@ fn profile_by_name_loads_program_section() {
     "#, read = read_list())).unwrap();
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_sandlock"))
-        .env("XDG_CONFIG_HOME", tmp.path())
+        .env("HOME", tmp.path())
         .args(["run", "--profile", "by-name-test"])
         .output()
         .expect("spawn sandlock");

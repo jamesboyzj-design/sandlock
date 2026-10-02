@@ -422,18 +422,18 @@ async fn main() -> Result<()> {
                 ProfileAction::List => {
                     let profiles = profile::list_profiles()?;
                     if profiles.is_empty() {
-                        println!("No profiles found in {}", profile::profile_dir().display());
+                        println!("No profiles found in {}", profile::profile_dir()?.display());
                     } else {
                         for name in profiles { println!("  {}", name); }
                     }
                 }
                 ProfileAction::Show { name } => {
-                    let path = profile::profile_dir().join(format!("{}.toml", name));
+                    let path = profile::profile_dir()?.join(format!("{}.toml", name));
                     let content = std::fs::read_to_string(&path)?;
                     println!("{}", content);
                 }
                 ProfileAction::Delete { name } => {
-                    let path = profile::profile_dir().join(format!("{}.toml", name));
+                    let path = profile::profile_dir()?.join(format!("{}.toml", name));
                     std::fs::remove_file(&path)?;
                     println!("Deleted profile '{}'", name);
                 }

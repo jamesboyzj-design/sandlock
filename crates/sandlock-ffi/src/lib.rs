@@ -2703,12 +2703,27 @@ pub unsafe extern "C" fn sandlock_profile_resolve(
 }
 
 /// The directory named profiles are loaded from, as the CLI resolves it.
-/// Free with `sandlock_string_free`.
+/// Returns NULL when no usable home directory exists, with `*err_msg` set;
+/// free either string with `sandlock_string_free`.
+///
+/// # Safety
+/// `err_msg` must be a valid pointer or NULL.
 #[no_mangle]
-pub extern "C" fn sandlock_profile_dir() -> *mut c_char {
-    CString::new(sandlock_core::profile::profile_dir().into_os_string().into_encoded_bytes())
-        .map(CString::into_raw)
-        .unwrap_or(ptr::null_mut())
+pub unsafe extern "C" fn sandlock_profile_dir(err_msg: *mut *mut c_char) -> *mut c_char {
+    if !err_msg.is_null() {
+        *err_msg = ptr::null_mut();
+    }
+    match sandlock_core::profile::profile_dir() {
+        Ok(dir) => CString::new(dir.into_os_string().into_encoded_bytes())
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        Err(e) => {
+            if !err_msg.is_null() {
+                *err_msg = CString::new(e.to_string()).map(CString::into_raw).unwrap_or(ptr::null_mut());
+            }
+            ptr::null_mut()
+        }
+    }
 }
 
 /// Load a checkpoint from a directory.

@@ -768,8 +768,7 @@ Default store: `~/.sandlock/checkpoints/`.
 
 ### Profiles
 
-Load sandbox configuration from TOML files in
-`$XDG_CONFIG_HOME/sandlock/profiles/` (default `~/.config/sandlock/profiles/`).
+Load sandbox configuration from TOML files in `~/.config/sandlock/profiles/`.
 They are parsed by the same core parser as the CLI, so a profile means the
 same thing to both. Profiles contain sandbox config only; pass the sandbox name at construction: `Sandbox(..., name=...)`.
 

@@ -137,27 +137,41 @@ func LoadProfileFile(path string) (*Sandbox, error) {
 
 // LoadProfile loads the named profile from ProfileDir.
 func LoadProfile(name string) (*Sandbox, error) {
-	path := filepath.Join(ProfileDir(), name+".toml")
+	dir, err := ProfileDir()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, name+".toml")
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("sandlock: profile not found: %s", path)
 	}
 	return LoadProfileFile(path)
 }
 
-// ProfileDir returns the directory named profiles live in, resolved as the
-// CLI resolves it ($XDG_CONFIG_HOME/sandlock/profiles).
-func ProfileDir() string {
-	p := C.sandlock_profile_dir()
+// ProfileDir returns ~/.config/sandlock/profiles, resolved as the CLI
+// resolves it; it fails when there is no usable home directory.
+func ProfileDir() (string, error) {
+	var errMsg *C.char
+	p := C.sandlock_profile_dir(&errMsg)
 	if p == nil {
-		return ""
+		msg := "no profile directory"
+		if errMsg != nil {
+			msg = C.GoString(errMsg)
+			C.sandlock_string_free(errMsg)
+		}
+		return "", fmt.Errorf("sandlock: %s", msg)
 	}
 	defer C.sandlock_string_free(p)
-	return C.GoString(p)
+	return C.GoString(p), nil
 }
 
 // ListProfiles returns the sorted names of the profiles in ProfileDir.
 func ListProfiles() ([]string, error) {
-	entries, err := os.ReadDir(ProfileDir())
+	dir, err := ProfileDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
