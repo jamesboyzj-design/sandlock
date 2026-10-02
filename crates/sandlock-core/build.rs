@@ -108,6 +108,46 @@ fn main() {
     // Emit the path every run (rustc-env is not cached across build-script runs),
     // whether or not the binary was just (re)built.
     println!("cargo:rustc-env=RESTORE_STUB_PATH={}", stub_bin.display());
+
+    // shebang-trampoline: runs a chroot script's #! interpreter (see the
+    // source). Freestanding, so any compiler for the target arch will do.
+    let tramp_src = manifest_dir.join("src/chroot/shebang-trampoline.c");
+    let tramp_bin = out_dir.join("shebang-trampoline");
+    let arch = target.split('-').next().unwrap_or_default();
+    let arch = if is_riscv64 { "riscv64" } else { arch };
+    let mut tramp_ccs = vec![format!("{arch}-linux-gnu-gcc"), format!("{arch}-unknown-linux-gnu-gcc")];
+    if host.starts_with(arch) {
+        tramp_ccs.insert(0, "cc".to_string());
+    }
+    let tramp_ccs: Vec<&str> = tramp_ccs.iter().map(String::as_str).collect();
+    if !build_static(
+        &tramp_src,
+        &tramp_bin,
+        &tramp_ccs,
+        &[
+            "-static",
+            "-nostdlib",
+            "-no-pie",
+            "-O2",
+            "-ffreestanding",
+            "-fno-tree-loop-distribute-patterns",
+            "-fno-stack-protector",
+        ],
+    ) {
+        let msg = format!(
+            "failed to compile shebang-trampoline for {arch}: no working C compiler \
+             (tried {}); #! scripts cannot run under chroot",
+            tramp_ccs.join(", "),
+        );
+        if matches!(arch, "x86_64" | "aarch64" | "riscv64") {
+            panic!("{msg}");
+        }
+        println!("cargo:warning={msg}");
+    }
+    if !tramp_bin.exists() {
+        std::fs::write(&tramp_bin, b"").unwrap();
+    }
+    println!("cargo:rustc-env=SHEBANG_TRAMPOLINE_PATH={}", tramp_bin.display());
 }
 
 /// Compile `src` to `bin` with the first working compiler in `ccs`, skipping the

@@ -126,19 +126,9 @@ fn memfd_with(bytes: &[u8]) -> io::Result<RawFd> {
 
 /// A sealed, executable memfd holding [`STUB_ELF`].
 fn stub_memfd() -> io::Result<RawFd> {
-    use std::io::Write;
-    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::fd::IntoRawFd;
 
-    let mut file = std::fs::File::from(crate::sys::syscall::memfd_create_exec(
-        "sandlock-restore-stub",
-        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-    )?);
-    file.write_all(STUB_ELF)?;
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(file.into_raw_fd())
+    crate::sys::syscall::sealed_exec_memfd("sandlock-restore-stub", STUB_ELF).map(IntoRawFd::into_raw_fd)
 }
 
 /// Move `fd` to a number at or above `floor` and take ownership of it.

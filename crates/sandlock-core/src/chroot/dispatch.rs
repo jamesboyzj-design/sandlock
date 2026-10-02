@@ -873,6 +873,84 @@ fn read_pt_interp(fd: RawFd) -> Option<(String, u64, usize)> {
     None
 }
 
+// ============================================================
+// `#!` script helpers
+// ============================================================
+
+/// The kernel reads this much of a script to find its `#!` line.
+const BINPRM_BUF_SIZE: usize = 256;
+
+struct Shebang {
+    interp: String,
+    arg: Option<Vec<u8>>,
+}
+
+/// Parse a `#!` line exactly as fs/binfmt_script.c does, so the interpreter
+/// gets the same argument it would from the kernel. None when the kernel would
+/// refuse it; the exec then proceeds unchanged and fails the same way.
+fn read_shebang(fd: RawFd) -> Option<Shebang> {
+    use std::os::unix::fs::FileExt;
+
+    let file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let mut buf = [0u8; BINPRM_BUF_SIZE];
+    let mut n = 0;
+    while n < buf.len() {
+        match file.read_at(&mut buf[n..], n as u64) {
+            Ok(0) => break,
+            Ok(r) => n += r,
+            Err(_) => return None,
+        }
+    }
+    if !buf.starts_with(b"#!") {
+        return None;
+    }
+    let spacetab = |b: u8| b == b' ' || b == b'\t';
+    let terminator = |b: u8| spacetab(b) || b == 0;
+    let buf_end = BINPRM_BUF_SIZE - 1;
+    let find = |from: usize, to: usize, pred: &dyn Fn(u8) -> bool| {
+        (from..=to).find(|&i| pred(buf[i]))
+    };
+
+    let mut i_end = match buf.iter().position(|&b| b == b'\n') {
+        Some(i) => i,
+        None => {
+            let name = find(2, buf_end, &|b| !spacetab(b))?;
+            find(name, buf_end, &terminator)?;
+            buf_end
+        }
+    };
+    while spacetab(buf[i_end - 1]) {
+        i_end -= 1;
+    }
+    let i_name = find(2, i_end, &|b| !spacetab(b)).filter(|&i| i != i_end)?;
+    let i_sep = find(i_name, i_end, &terminator).filter(|&i| i < i_end);
+    let arg = i_sep
+        .filter(|&i| buf[i] != 0)
+        .and_then(|i| find(i, i_end, &|b| !spacetab(b)))
+        .map(|i| {
+            let arg = &buf[i..i_end];
+            arg[..arg.iter().position(|&b| b == 0).unwrap_or(arg.len())].to_vec()
+        });
+    let interp = String::from_utf8_lossy(&buf[i_name..i_sep.unwrap_or(i_end)]).into_owned();
+    Some(Shebang { interp, arg })
+}
+
+/// A script for the kernel to run in place of the original: its `#!` line
+/// starts the trampoline at `trampoline_fd`, and its body tells the
+/// trampoline what to exec (see shebang-trampoline.c).
+fn shebang_launcher(shebang: &Shebang, trampoline_fd: i32, script: &str) -> Result<OwnedFd, i32> {
+    let mut body = format!("#!/proc/self/fd/{trampoline_fd}\n{}\0", shebang.interp).into_bytes();
+    body.extend_from_slice(shebang.arg.as_deref().unwrap_or_default());
+    body.push(0);
+    body.extend_from_slice(script.as_bytes());
+    body.push(0);
+    let memfd = crate::sys::syscall::memfd_create_exec("sandlock-exec", 0).map_err(|_| libc::EIO)?;
+    std::fs::File::from(memfd.try_clone().map_err(|_| libc::EIO)?)
+        .write_all(&body)
+        .map_err(|_| libc::EIO)?;
+    Ok(memfd)
+}
+
 /// Create a memfd copy of `src_fd` with PT_INTERP patched to `new_interp`.
 /// Uses sendfile for efficient kernel-to-kernel copy, then patches the
 /// interpreter path in place.
@@ -1031,6 +1109,86 @@ fn open_exec_by_fd(
     Ok((src_fd, virtual_path))
 }
 
+/// Inject `fd` into the exec'ing guest.
+fn inject_exec_fd(
+    notif: &SeccompNotif,
+    notif_fd: RawFd,
+    fd: RawFd,
+    newfd_flags: u32,
+) -> Result<i32, i32> {
+    let addfd = SeccompNotifAddfd {
+        id: notif.id,
+        flags: 0,
+        srcfd: fd as u32,
+        newfd: 0,
+        newfd_flags,
+    };
+    let child_fd = unsafe {
+        libc::ioctl(notif_fd, SECCOMP_IOCTL_NOTIF_ADDFD as libc::Ioctl, &addfd as *const _)
+    };
+    if child_fd < 0 { Err(libc::EIO) } else { Ok(child_fd) }
+}
+
+const SHEBANG_TRAMPOLINE: &[u8] = include_bytes!(env!("SHEBANG_TRAMPOLINE_PATH"));
+
+/// The kernel's exec_binprm() limit on nested `#!` interpreters.
+const MAX_SCRIPT_DEPTH: usize = 5;
+
+/// Fail the exec as the kernel would when a script's interpreter chain is
+/// missing, refused, or too deep. Each trampoline hop is a fresh exec the
+/// kernel no longer counts, so a script naming itself would loop forever.
+fn check_interp_chain(notif: &SeccompNotif, ctx: &ChrootCtx<'_>, interp: &str) -> Result<(), i32> {
+    let mut interp = interp.to_string();
+    for _ in 0..MAX_SCRIPT_DEPTH {
+        let (fd, _) = open_exec_by_path(notif, libc::AT_FDCWD as i64, interp, ctx)?;
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        match read_shebang(fd.as_raw_fd()) {
+            Some(next) => interp = next.interp,
+            None => return Ok(()),
+        }
+    }
+    Err(libc::ELOOP)
+}
+
+/// Ready an image for the kernel to load. The kernel opens an ELF's PT_INTERP
+/// and a script's `#!` interpreter itself, against the host root, so each is
+/// redirected to an fd that leads back inside the chroot.
+fn prepare_exec_image(
+    notif: &SeccompNotif,
+    notif_fd: RawFd,
+    ctx: &ChrootCtx<'_>,
+    src: OwnedFd,
+    exec_name: &str,
+) -> Result<OwnedFd, i32> {
+    if let Some(shebang) = read_shebang(src.as_raw_fd()) {
+        if SHEBANG_TRAMPOLINE.is_empty() {
+            return Err(libc::ENOEXEC);
+        }
+        check_interp_chain(notif, ctx, &shebang.interp)?;
+        let trampoline = crate::sys::syscall::sealed_exec_memfd("sandlock-shebang", SHEBANG_TRAMPOLINE)
+            .map_err(|_| libc::EIO)?;
+        // The kernel opens the trampoline before it closes O_CLOEXEC fds.
+        let child_fd = inject_exec_fd(notif, notif_fd, trampoline.as_raw_fd(), libc::O_CLOEXEC as u32)?;
+        return shebang_launcher(&shebang, child_fd, exec_name);
+    }
+
+    let Some((interp_path, interp_offset, interp_cap)) = read_pt_interp(src.as_raw_fd()) else {
+        return Ok(src);
+    };
+    // Not mount-aware: the dynamic linker comes from the base image, not
+    // from workspace mounts.
+    let interp_src = openat2_in_root(ctx.root, &interp_path, libc::O_RDONLY | libc::O_CLOEXEC, 0)
+        .map_err(|_| libc::ENOENT)?;
+    let interp_src = unsafe { OwnedFd::from_raw_fd(interp_src) };
+    let child_interp_fd = inject_exec_fd(notif, notif_fd, interp_src.as_raw_fd(), 0)?;
+    let new_interp = format!("/proc/self/fd/{}", child_interp_fd);
+    match memfd_with_patched_interp(src.as_raw_fd(), &new_interp, interp_offset, interp_cap) {
+        Some(memfd) => Ok(memfd),
+        // The host's ld.so is used, as before this patching existed.
+        None => Ok(src),
+    }
+}
+
 pub(crate) async fn handle_chroot_exec(
     notif: &SeccompNotif,
     chroot_state: &Arc<Mutex<ChrootState>>,
@@ -1051,6 +1209,14 @@ pub(crate) async fn handle_chroot_exec(
     };
 
     let flags = if nr == libc::SYS_execveat { notif.data.args[4] as i32 } else { 0 };
+    // What the kernel's alloc_bprm() hands a script's interpreter as the script.
+    let exec_name = if rel_path.starts_with('/') || dirfd == libc::AT_FDCWD as i64 {
+        rel_path.clone()
+    } else if rel_path.is_empty() {
+        format!("/dev/fd/{dirfd}")
+    } else {
+        format!("/dev/fd/{dirfd}/{rel_path}")
+    };
     let opened = if rel_path.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
         open_exec_by_fd(notif, dirfd as i32, ctx)
     } else {
@@ -1061,67 +1227,11 @@ pub(crate) async fn handle_chroot_exec(
         Err(errno) => return NotifAction::Errno(errno),
     };
 
-    // Read PT_INTERP from the binary. If it has one, open the image's
-    // interpreter and create a memfd copy with PT_INTERP patched to
-    // point at the injected interpreter fd. This ensures the kernel loads
-    // the image's ld-linux (not the host's), avoiding glibc version
-    // mismatches between ld.so and libc.so.
-    let exec_fd = if let Some((interp_path, interp_offset, interp_cap)) = read_pt_interp(src_fd) {
-        // Open the image's interpreter from the chroot root (intentionally
-        // NOT mount-aware ��� the dynamic linker should come from the base
-        // image, not from workspace mounts).
-        let interp_src = match openat2_in_root(
-            ctx.root,
-            &interp_path,
-            libc::O_RDONLY | libc::O_CLOEXEC,
-            0,
-        ) {
-            Ok(fd) => fd,
-            Err(_) => {
-                unsafe { libc::close(src_fd) };
-                return NotifAction::Errno(libc::ENOENT);
-            }
-        };
-
-        // Inject the interpreter fd into the child (must survive exec)
-        let addfd_interp = SeccompNotifAddfd {
-            id: notif.id,
-            flags: 0,
-            srcfd: interp_src as u32,
-            newfd: 0,
-            newfd_flags: 0,
-        };
-        let child_interp_fd = unsafe {
-            libc::ioctl(
-                notif_fd,
-                SECCOMP_IOCTL_NOTIF_ADDFD as libc::Ioctl,
-                &addfd_interp as *const _,
-            )
-        };
-        unsafe { libc::close(interp_src) };
-
-        if child_interp_fd < 0 {
-            unsafe { libc::close(src_fd) };
-            return NotifAction::Errno(libc::EIO);
-        }
-
-        // Create a memfd copy with PT_INTERP patched to /proc/self/fd/<interp_fd>
-        let new_interp = format!("/proc/self/fd/{}", child_interp_fd);
-        match memfd_with_patched_interp(src_fd, &new_interp, interp_offset, interp_cap) {
-            Some(memfd) => {
-                unsafe { libc::close(src_fd) };
-                memfd
-            }
-            None => {
-                // Patching failed (e.g., new path too long) — fall back to
-                // original binary. Host ld-linux will be used; this is the
-                // pre-existing behavior and may work if versions are compatible.
-                unsafe { OwnedFd::from_raw_fd(src_fd) }
-            }
-        }
-    } else {
-        // Statically linked or not ELF — use the binary directly.
-        unsafe { OwnedFd::from_raw_fd(src_fd) }
+    let exec_fd = match prepare_exec_image(
+        notif, notif_fd, ctx, unsafe { OwnedFd::from_raw_fd(src_fd) }, &exec_name,
+    ) {
+        Ok(r) => r,
+        Err(errno) => return NotifAction::Errno(errno),
     };
 
     // Record the virtual exe path so /proc/self/exe queries return the
