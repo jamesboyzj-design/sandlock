@@ -851,6 +851,32 @@ static int cmd_write_fd_link(int argc, char **argv) {
     return 0;
 }
 
+/* ── fexecve (exec an image by fd, no path) ─────────────────── */
+/*
+ * fexecve <path> fd|memfd <args...>: exec <path> through an fd rather than its
+ * name, either the file itself or a memfd copy of it, with argv <args...>.
+ */
+static int cmd_fexecve(int argc, char **argv) {
+    if (argc < 3) { fprintf(stderr, "fexecve: need <path> fd|memfd <args...>\n"); return 1; }
+    int fd = open(argv[0], O_RDONLY);
+    if (fd < 0) { fprintf(stderr, "fexecve: open %s: %s\n", argv[0], strerror(errno)); return 1; }
+    if (strcmp(argv[1], "memfd") == 0) {
+        int mfd = syscall(SYS_memfd_create, "fexecve-copy", 0);
+        if (mfd < 0) { fprintf(stderr, "fexecve: memfd_create: %s\n", strerror(errno)); return 1; }
+        char buf[65536];
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            if (write(mfd, buf, n) != n) { fprintf(stderr, "fexecve: copy: %s\n", strerror(errno)); return 1; }
+        }
+        close(fd);
+        fd = mfd;
+    }
+    extern char **environ;
+    syscall(SYS_execveat, fd, "", &argv[2], environ, AT_EMPTY_PATH);
+    fprintf(stderr, "fexecve: execveat: %s\n", strerror(errno));
+    return 1;
+}
+
 /* ── dispatch ───────────────────────────────────────────────── */
 
 static int dispatch(const char *cmd, int argc, char **argv) {
@@ -887,6 +913,7 @@ static int dispatch(const char *cmd, int argc, char **argv) {
     if (strcmp(cmd, "fstat-fd") == 0)      return cmd_fstat_fd(argc, argv);
     if (strcmp(cmd, "spawn-loop") == 0)     return cmd_spawn_loop(argc, argv);
     if (strcmp(cmd, "clock-loop") == 0)     return cmd_clock_loop(argc, argv);
+    if (strcmp(cmd, "fexecve") == 0)        return cmd_fexecve(argc, argv);
     if (strcmp(cmd, "true") == 0)           return 0;
     if (strcmp(cmd, "false") == 0)          return 1;
 

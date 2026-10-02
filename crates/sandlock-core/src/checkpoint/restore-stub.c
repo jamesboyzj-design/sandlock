@@ -55,6 +55,7 @@
 #define CTRL_FD 3
 #define READY_FD 4
 #define GO_FD 5
+#define STUB_FD 6
 
 /* The window this stub is linked into, mirroring restore_blob::STUB_BASE and
  * STUB_SPAN and the -Wl,-Ttext-segment= flag in build.rs. Used only to refuse a
@@ -441,10 +442,11 @@ static void _start_c(u64 *sp) {
     }
 
     /* 8. Reopen the fd table. The control fds go first: a restored fd number
-     * may well be 3, 4 or 5, and nothing needs them from here on. */
+     * may well be 3 to 6, and nothing needs them from here on. */
     SC1(SYS_close, CTRL_FD);
     SC1(SYS_close, READY_FD);
     SC1(SYS_close, GO_FD);
+    SC1(SYS_close, STUB_FD);
     for (i = 0; i < h->n_fds; i++) {
         struct blob_fd *f = &fds[i];
         i64 fd = SC4(SYS_openat, AT_FDCWD, strings + f->path_off, f->flags, 0);
