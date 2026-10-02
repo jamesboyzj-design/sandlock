@@ -18,9 +18,8 @@
 
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
 
-use crate::checkpoint::{CTRL_FD, GO_FD, READY_FD};
+use crate::checkpoint::{CTRL_FD, GO_FD, READY_FD, STUB_FD};
 use crate::error::{SandboxRuntimeError, SandlockError};
 
 /// How long to wait for the stub to finish laying out the address space.
@@ -36,14 +35,15 @@ fn child_err(msg: String) -> SandlockError {
     SandlockError::Runtime(SandboxRuntimeError::Child(msg))
 }
 
-/// Path to the freestanding restore-stub binary, compiled by `build.rs`.
-pub(crate) fn stub_path() -> PathBuf {
-    PathBuf::from(env!("RESTORE_STUB_PATH"))
-}
+/// The freestanding restore-stub, compiled by `build.rs`. Embedded rather than
+/// exec'd from its build path, which does not exist once sandlock is installed.
+/// Empty when this arch has no restore engine or no C compiler was found.
+pub(crate) const STUB_ELF: &[u8] = include_bytes!(env!("RESTORE_STUB_PATH"));
 
 /// The fds the stub inherits, held open in the supervisor for the handshake.
 /// Their numbers in the child are fixed by the [`CTRL_FD`]/[`READY_FD`]/
-/// [`GO_FD`] convention; `Sandbox`'s `extra_fds` mechanism does the `dup2`.
+/// [`GO_FD`]/[`STUB_FD`] convention; `Sandbox`'s `extra_fds` mechanism does the
+/// `dup2`.
 ///
 /// READY is an eventfd the stub signals once the address space is laid out. GO
 /// is a pipe rather than an eventfd because it carries data back: the count of
@@ -57,21 +57,24 @@ pub(crate) struct StubChannel {
     go_r: OwnedFd,
     /// Write end, kept here.
     go_w: OwnedFd,
+    stub: OwnedFd,
 }
 
 impl StubChannel {
-    /// Build the control-blob memfd, the READY eventfd and the GO pipe, each
-    /// relocated clear of the fixed child-side numbers (see [`relocate_above`]).
+    /// Build the control-blob memfd, the READY eventfd, the GO pipe and the
+    /// stub memfd, each relocated clear of the fixed child-side numbers (see
+    /// [`relocate_above`]).
     pub(crate) fn new(blob: &[u8]) -> io::Result<Self> {
-        let ctrl = relocate_above(memfd_with(blob)?, GO_FD + 1)?;
-        let ready = relocate_above(eventfd()?, GO_FD + 1)?;
+        let ctrl = relocate_above(memfd_with(blob)?, STUB_FD + 1)?;
+        let ready = relocate_above(eventfd()?, STUB_FD + 1)?;
         let mut pipefd = [0i32; 2];
         if unsafe { libc::pipe2(pipefd.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(io::Error::last_os_error());
         }
-        let go_r = relocate_above(pipefd[0], GO_FD + 1)?;
-        let go_w = relocate_above(pipefd[1], GO_FD + 1)?;
-        Ok(StubChannel { ctrl, ready, go_r, go_w })
+        let go_r = relocate_above(pipefd[0], STUB_FD + 1)?;
+        let go_w = relocate_above(pipefd[1], STUB_FD + 1)?;
+        let stub = relocate_above(stub_memfd()?, STUB_FD + 1)?;
+        Ok(StubChannel { ctrl, ready, go_r, go_w, stub })
     }
 
     /// The `(child fd, supervisor fd)` pairs for `Sandbox`'s `extra_fds`.
@@ -81,6 +84,7 @@ impl StubChannel {
             (CTRL_FD, self.ctrl.as_raw_fd()),
             (READY_FD, self.ready.as_raw_fd()),
             (GO_FD, self.go_r.as_raw_fd()),
+            (STUB_FD, self.stub.as_raw_fd()),
         ]
     }
 }
@@ -118,6 +122,32 @@ fn memfd_with(bytes: &[u8]) -> io::Result<RawFd> {
         return Err(e);
     }
     Ok(fd)
+}
+
+/// A sealed, executable memfd holding [`STUB_ELF`]. `MFD_EXEC` keeps a
+/// `vm.memfd_noexec=1` host from sealing it non-executable; kernels before 6.3
+/// reject the flag, and their memfds are always executable.
+fn stub_memfd() -> io::Result<RawFd> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, IntoRawFd};
+
+    let name = c"sandlock-restore-stub";
+    let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
+    let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags | libc::MFD_EXEC) };
+    if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+        fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
+    }
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let mut file = std::fs::File::from(fd);
+    file.write_all(STUB_ELF)?;
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file.into_raw_fd())
 }
 
 /// Move `fd` to a number at or above `floor` and take ownership of it.
@@ -297,19 +327,29 @@ mod tests {
 
     #[test]
     fn channel_fds_land_above_the_fixed_child_numbers() {
-        // A control fd allocated at 3/4/5 would be dup2'd onto itself in the
+        // A control fd allocated at 3 to 6 would be dup2'd onto itself in the
         // child, which leaves FD_CLOEXEC set and closes it at execve.
         let ch = StubChannel::new(b"blob").expect("channel");
         for fd in [ch.ctrl.as_raw_fd(), ch.ready.as_raw_fd(),
-                   ch.go_r.as_raw_fd(), ch.go_w.as_raw_fd()] {
-            assert!(fd > GO_FD, "fd {fd} must sit above the fixed control fds");
+                   ch.go_r.as_raw_fd(), ch.go_w.as_raw_fd(), ch.stub.as_raw_fd()] {
+            assert!(fd > STUB_FD, "fd {fd} must sit above the fixed control fds");
         }
         let mut pairs = ch.extra_fds();
         pairs.sort();
         assert_eq!(
             pairs.iter().map(|&(child, _)| child).collect::<Vec<_>>(),
-            vec![CTRL_FD, READY_FD, GO_FD],
+            vec![CTRL_FD, READY_FD, GO_FD, STUB_FD],
         );
+    }
+
+    #[test]
+    fn stub_memfd_is_sealed_and_holds_the_stub() {
+        let ch = StubChannel::new(b"blob").expect("channel");
+        let fd = ch.stub.as_raw_fd();
+        let seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+        assert!(seals & libc::F_SEAL_WRITE != 0, "stub memfd must be write-sealed");
+        let got = std::fs::read(format!("/proc/self/fd/{fd}")).expect("read stub memfd");
+        assert_eq!(got, STUB_ELF);
     }
 
     #[test]
@@ -398,10 +438,11 @@ mod tests {
     fn stub_links_at_the_reserved_base() {
         use crate::checkpoint::restore_blob::{STUB_BASE, STUB_SPAN};
 
-        let Ok(elf) = std::fs::read(stub_path()) else {
+        let elf = STUB_ELF;
+        if elf.is_empty() {
             eprintln!("skip: restore-stub not built");
             return;
-        };
+        }
         // ELF64 program headers: e_phoff@32, e_phentsize@54, e_phnum@56.
         // Each PT_LOAD entry: p_type@0, p_vaddr@16, p_memsz@40.
         let phoff = u64::from_le_bytes(elf[32..40].try_into().unwrap()) as usize;
@@ -435,10 +476,11 @@ mod tests {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn stub_carries_no_stack_protector() {
-        let Ok(elf) = std::fs::read(stub_path()) else {
+        let elf = STUB_ELF;
+        if elf.is_empty() {
             eprintln!("skip: restore-stub not built");
             return;
-        };
+        }
         const CANARY_LOAD: &[u8] = &[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00];
         assert!(
             !elf.windows(CANARY_LOAD.len()).any(|w| w == CANARY_LOAD),
@@ -468,9 +510,8 @@ mod tests {
         const SENTINEL: u8 = 0x5A;
         const PAGE: u64 = 0x1000;
 
-        let stub = stub_path();
-        if !stub.exists() {
-            eprintln!("skip: restore-stub not built ({})", stub.display());
+        if STUB_ELF.is_empty() {
+            eprintln!("skip: restore-stub not built");
             return;
         }
 
@@ -528,10 +569,7 @@ mod tests {
         let plan = restore_blob::plan(&cp, None, &[]).expect("plan");
         let channel = StubChannel::new(&plan.blob).expect("channel");
 
-        // Build the exec path before fork: CString::new allocates, and
-        // allocating between fork() and execve() in a multithreaded process (the
-        // test harness) can deadlock on the allocator lock.
-        let stub_path = std::ffi::CString::new(stub.to_str().unwrap()).unwrap();
+        let stub_name = c"sandlock-restore-stub";
 
         // Relocate the sentinel pipe clear of every fixed number the child
         // installs, OUT_FD included. Left at 3/4 (which is exactly where the
@@ -543,8 +581,12 @@ mod tests {
         let pipe_w = relocate_above(pipefd[1], OUT_FD + 1).expect("relocate pipe write end");
         let (pipe_r, pipe_w) = (pipe_r.into_raw_fd(), pipe_w.into_raw_fd());
 
-        let (ctrl, ready, go) =
-            (channel.ctrl.as_raw_fd(), channel.ready.as_raw_fd(), channel.go_r.as_raw_fd());
+        let (ctrl, ready, go, stub) = (
+            channel.ctrl.as_raw_fd(),
+            channel.ready.as_raw_fd(),
+            channel.go_r.as_raw_fd(),
+            channel.stub.as_raw_fd(),
+        );
         let child = unsafe { libc::fork() };
         assert!(child >= 0, "fork");
         if child == 0 {
@@ -554,10 +596,14 @@ mod tests {
                 libc::dup2(ctrl, CTRL_FD);
                 libc::dup2(ready, READY_FD);
                 libc::dup2(go, GO_FD);
+                libc::dup2(stub, STUB_FD);
                 libc::dup2(pipe_w, OUT_FD);
-                let argv = [stub_path.as_ptr(), std::ptr::null()];
-                let envp = [std::ptr::null()];
-                libc::execve(stub_path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                let argv = [stub_name.as_ptr(), std::ptr::null()];
+                let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+                libc::syscall(
+                    libc::SYS_execveat, STUB_FD, c"".as_ptr(), argv.as_ptr(), envp.as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                );
                 libc::_exit(127);
             }
         }
@@ -610,9 +656,8 @@ mod tests {
         const SENTINEL: u8 = 0x5A;
         const PAGE: u64 = 0x1000;
 
-        let stub = stub_path();
-        if !stub.exists() {
-            eprintln!("skip: restore-stub not built ({})", stub.display());
+        if STUB_ELF.is_empty() {
+            eprintln!("skip: restore-stub not built");
             return;
         }
 
@@ -676,7 +721,7 @@ mod tests {
         let plan = restore_blob::plan(&cp, None, &[]).expect("plan");
         let channel = StubChannel::new(&plan.blob).expect("channel");
 
-        let stub_path = std::ffi::CString::new(stub.to_str().unwrap()).unwrap();
+        let stub_name = c"sandlock-restore-stub";
 
         let mut pipefd = [0i32; 2];
         assert_eq!(unsafe { libc::pipe(pipefd.as_mut_ptr()) }, 0);
@@ -684,8 +729,12 @@ mod tests {
         let pipe_w = relocate_above(pipefd[1], OUT_FD + 1).expect("relocate pipe write end");
         let (pipe_r, pipe_w) = (pipe_r.into_raw_fd(), pipe_w.into_raw_fd());
 
-        let (ctrl, ready, go) =
-            (channel.ctrl.as_raw_fd(), channel.ready.as_raw_fd(), channel.go_r.as_raw_fd());
+        let (ctrl, ready, go, stub) = (
+            channel.ctrl.as_raw_fd(),
+            channel.ready.as_raw_fd(),
+            channel.go_r.as_raw_fd(),
+            channel.stub.as_raw_fd(),
+        );
         let child = unsafe { libc::fork() };
         assert!(child >= 0, "fork");
         if child == 0 {
@@ -693,10 +742,14 @@ mod tests {
                 libc::dup2(ctrl, CTRL_FD);
                 libc::dup2(ready, READY_FD);
                 libc::dup2(go, GO_FD);
+                libc::dup2(stub, STUB_FD);
                 libc::dup2(pipe_w, OUT_FD);
-                let argv = [stub_path.as_ptr(), std::ptr::null()];
-                let envp = [std::ptr::null()];
-                libc::execve(stub_path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                let argv = [stub_name.as_ptr(), std::ptr::null()];
+                let envp: [*const libc::c_char; 1] = [std::ptr::null()];
+                libc::syscall(
+                    libc::SYS_execveat, STUB_FD, c"".as_ptr(), argv.as_ptr(), envp.as_ptr(),
+                    libc::AT_EMPTY_PATH,
+                );
                 libc::_exit(127);
             }
         }

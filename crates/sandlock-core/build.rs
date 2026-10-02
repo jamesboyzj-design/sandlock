@@ -23,7 +23,8 @@ fn main() {
     // restore-stub: a core component of the restore engine (the supervisor execs
     // it to reconstruct a checkpoint), freestanding, no libc, no PIE. It lives
     // next to the checkpoint code that owns it; its binary is built into OUT_DIR
-    // and its path is handed to the crate via the RESTORE_STUB_PATH env var.
+    // and its path is handed to the crate via the RESTORE_STUB_PATH env var,
+    // which embeds it: an installed sandlock has no build tree to exec from.
     //
     // The fixed load address must match `checkpoint::restore_blob::STUB_BASE`:
     // the stub reconstructs the checkpoint's layout around itself, so its own
@@ -98,6 +99,11 @@ fn main() {
             panic!("{fail_msg}");
         }
         println!("cargo:warning={fail_msg}");
+    }
+    // The crate embeds the stub with include_bytes!, so an arch without restore
+    // still needs a file there; the runtime treats an empty stub as unavailable.
+    if !stub_bin.exists() {
+        std::fs::write(&stub_bin, b"").unwrap();
     }
     // Emit the path every run (rustc-env is not cached across build-script runs),
     // whether or not the binary was just (re)built.

@@ -213,6 +213,10 @@ pub(crate) enum ChildEntry<'a> {
     /// already mapped, nothing is exec'd, and Landlock has no execve to
     /// authorize. `run` must not return; `confine_child` `_exit(0)`s if it does.
     InProcess { name: &'a CStr, run: fn() },
+    /// `execveat` the image open at child fd `fd`. No path is resolved, so an
+    /// image with no place in the sandbox's filesystem (the embedded restore
+    /// stub) runs without a Landlock grant or a path rewrite.
+    ExecFd { fd: RawFd, argv: &'a [CString] },
 }
 
 pub(crate) struct ChildSpawnArgs<'a> {
@@ -596,7 +600,7 @@ pub(crate) fn confine_child(args: ChildSpawnArgs<'_>) -> ! {
     // 14. Terminal action: run the in-process entrypoint, or fall through to
     // execve the command. The in-process arm diverges (`_exit`), so the match
     // yields the command slice only on the `Exec` path.
-    let cmd: &[CString] = match entry {
+    let (cmd, exec_fd): (&[CString], Option<RawFd>) = match entry {
         ChildEntry::InProcess { name, run } => {
             // Name the PID-1 so ps / /proc/<pid>/comm read correctly: there is
             // no execve here to set argv[0]. The child is a fork of the
@@ -606,7 +610,8 @@ pub(crate) fn confine_child(args: ChildSpawnArgs<'_>) -> ! {
             run();
             unsafe { libc::_exit(0) };
         }
-        ChildEntry::Exec(cmd) => cmd,
+        ChildEntry::Exec(cmd) => (cmd, None),
+        ChildEntry::ExecFd { fd, argv } => (argv, Some(fd)),
     };
 
     // 14. exec
@@ -623,7 +628,21 @@ pub(crate) fn confine_child(args: ChildSpawnArgs<'_>) -> ! {
         .chain(std::iter::once(std::ptr::null()))
         .collect();
 
-    if sandbox.chroot.is_some() {
+    if let Some(fd) = exec_fd {
+        extern "C" {
+            static environ: *const *const libc::c_char;
+        }
+        unsafe {
+            libc::syscall(
+                libc::SYS_execveat,
+                fd,
+                c"".as_ptr(),
+                argv_ptrs.as_ptr(),
+                environ,
+                libc::AT_EMPTY_PATH,
+            )
+        };
+    } else if sandbox.chroot.is_some() {
         // With chroot the seccomp handler rewrites the filename to a host path
         // (or /proc/self/fd/N).  Pass a separate PATH_MAX buffer as the `file`
         // argument so the rewrite does not corrupt argv[0] — which must stay as
@@ -644,7 +663,7 @@ pub(crate) fn confine_child(args: ChildSpawnArgs<'_>) -> ! {
     }
 
     // If we get here, exec failed
-    fail!(format!("execvp '{}'", cmd[0].to_string_lossy()));
+    fail!(format!("exec '{}'", cmd[0].to_string_lossy()));
 }
 
 // ============================================================

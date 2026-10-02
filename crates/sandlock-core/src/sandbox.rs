@@ -299,6 +299,8 @@ struct Runtime {
     stdout_pipe: Option<std::os::fd::OwnedFd>,
     io_overrides: Option<(Option<i32>, Option<i32>, Option<i32>)>,
     extra_fds: Vec<(i32, i32)>,
+    /// Child fd to `execveat` instead of resolving `cmd[0]` as a path.
+    exec_fd: Option<i32>,
     http_acl_handle: Option<crate::transparent_proxy::HttpAclProxyHandle>,
     #[allow(clippy::type_complexity)]
     on_bind: Option<Box<dyn Fn(&HashMap<u16, u16>) + Send + Sync>>,
@@ -1236,13 +1238,12 @@ impl Sandbox {
             .into());
         }
 
-        let stub = resume::stub_path();
-        if !stub.exists() {
-            return Err(SandboxRuntimeError::Child(format!(
-                "restore-stub was not built ({}); a C compiler is required to build sandlock \
-                 with checkpoint restore",
-                stub.display()
-            ))
+        if resume::STUB_ELF.is_empty() {
+            return Err(SandboxRuntimeError::Child(
+                "restore-stub was not built; a C compiler is required to build sandlock \
+                 with checkpoint restore"
+                    .into(),
+            )
             .into());
         }
 
@@ -1258,15 +1259,10 @@ impl Sandbox {
         let channel = resume::StubChannel::new(&plan.blob)
             .map_err(|e| SandboxRuntimeError::Child(format!("restore control channel: {e}")))?;
 
-        // Landlock checks EXECUTE on the real path at execve time, so the stub
-        // binary has to be inside the policy's read+execute grant. It is a
-        // build artifact of sandlock itself, not workload-reachable state.
-        self.fs_readable.push(stub.clone());
-
         self.ensure_runtime()?;
         self.rt_mut().extra_fds = channel.extra_fds();
-        let stub_s = stub.to_string_lossy().into_owned();
-        self.create_interactive(&[stub_s.as_str()]).await?;
+        self.rt_mut().exec_fd = Some(crate::checkpoint::STUB_FD);
+        self.create_interactive(&["sandlock-restore-stub"]).await?;
         let pid = self.pid().ok_or(SandboxRuntimeError::NotRunning)?;
         // Release the parked child to execve the stub. From here the stub runs
         // confined, and its openat calls flow through the notify supervisor,
@@ -1637,6 +1633,7 @@ impl Sandbox {
                 stdout_pipe: pipe,
                 io_overrides: None,
                 extra_fds: Vec::new(),
+                exec_fd: None,
                 http_acl_handle: None,
                 on_bind: None,
                 handlers: Vec::new(),
@@ -1741,6 +1738,7 @@ impl Sandbox {
             stdout_pipe: None,
             io_overrides: None,
             extra_fds: Vec::new(),
+            exec_fd: None,
             http_acl_handle: None,
             on_bind: None,
             handlers: Vec::new(),
@@ -2073,9 +2071,10 @@ impl Sandbox {
 
             // In-process entrypoint (OCI PID-1) names the process from cmd[0];
             // otherwise execve the command.
-            let entry = match self.in_child_main {
-                Some(run) => context::ChildEntry::InProcess { name: c_cmd[0].as_c_str(), run },
-                None => context::ChildEntry::Exec(&c_cmd),
+            let entry = match (self.in_child_main, self.rt().exec_fd) {
+                (Some(run), _) => context::ChildEntry::InProcess { name: c_cmd[0].as_c_str(), run },
+                (None, Some(fd)) => context::ChildEntry::ExecFd { fd, argv: &c_cmd },
+                (None, None) => context::ChildEntry::Exec(&c_cmd),
             };
             context::confine_child(context::ChildSpawnArgs {
                 sandbox: self,
