@@ -34,6 +34,9 @@ hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "native-tokio", "http1", "tls12", "logging"] }
 tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+ruzstd = "0.9"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"], optional = true }
 bollard = "0.21"
 futures-util = "0.3"
