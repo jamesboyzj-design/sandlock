@@ -862,6 +862,19 @@ impl SandboxBuilder {
         }
         let discard = self.image_rootfs.is_some();
 
+        // Lookup picks the first of two equal-length prefixes, so a repeated
+        // virtual path would silently drop one mapping and, with it, possibly
+        // the read-only marking the operator asked for.
+        let mut seen = std::collections::HashSet::new();
+        for (virt, _) in &self.fs_mount {
+            if !seen.insert(virt) {
+                return Err(SandboxError::Invalid(format!(
+                    "virtual path {} is mounted more than once",
+                    virt.display()
+                )));
+            }
+        }
+
         // Validate: max_cpu must be 1-100
         if let Some(cpu) = self.max_cpu {
             if cpu == 0 || cpu > 100 {
@@ -1194,6 +1207,22 @@ mod tests {
             .max_open_files(64)
             .build()
             .expect("a non-zero cap must build");
+    }
+
+    #[test]
+    fn repeated_mount_virtual_path_is_rejected() {
+        let err = super::SandboxBuilder::default()
+            .fs_mount("/work", "/a")
+            .fs_mount_ro("/work", "/b")
+            .build()
+            .expect_err("a virtual path mounted twice must not build");
+        assert!(err.to_string().contains("/work"), "got: {err}");
+
+        super::SandboxBuilder::default()
+            .fs_mount("/work", "/a")
+            .fs_mount_ro("/work/sub", "/b")
+            .build()
+            .expect("nested virtual paths must still build");
     }
 
     #[test]
