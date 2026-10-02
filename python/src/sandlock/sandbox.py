@@ -431,6 +431,10 @@ class Sandbox:
     Example: {"/work": "/host/sandbox/work"} makes /work inside the
     chroot resolve to /host/sandbox/work on the host."""
 
+    fs_mount_ro: Mapping[str, str] = field(default_factory=dict)
+    """Like ``fs_mount``, but writes under the virtual path are denied
+    with EACCES. A virtual path may not appear in both mappings."""
+
     # Environment
     clean_env: bool = False
     """If True, start with a minimal environment (PATH, HOME, USER, TERM, LANG).

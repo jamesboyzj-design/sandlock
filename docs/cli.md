@@ -186,7 +186,7 @@ to forked children.
 ## Profiles
 
 Save reusable sandbox profiles as TOML files in
-`~/.config/sandlock/profiles/`. Profiles use a sectioned schema; top-level
+`$XDG_CONFIG_HOME/sandlock/profiles/` (default `~/.config/sandlock/profiles/`). Profiles use a sectioned schema; top-level
 flat keys such as `fs_readable = [...]` are rejected. Pass a sandbox instance
 name with `--name` when you need a stable virtual hostname.
 

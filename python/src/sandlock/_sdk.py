@@ -82,6 +82,7 @@ _b_cwd = _builder_fn("sandlock_sandbox_builder_cwd", ctypes.c_char_p)
 _b_chroot = _builder_fn("sandlock_sandbox_builder_chroot", ctypes.c_char_p)
 _b_image = _builder_fn("sandlock_sandbox_builder_image", ctypes.c_char_p)
 _b_fs_mount = _builder_fn("sandlock_sandbox_builder_fs_mount", ctypes.c_char_p, ctypes.c_char_p)
+_b_fs_mount_ro = _builder_fn("sandlock_sandbox_builder_fs_mount_ro", ctypes.c_char_p, ctypes.c_char_p)
 _b_on_exit = _builder_fn("sandlock_sandbox_builder_on_exit", ctypes.c_uint8)
 _b_on_error = _builder_fn("sandlock_sandbox_builder_on_error", ctypes.c_uint8)
 _b_max_memory = _builder_fn("sandlock_sandbox_builder_max_memory", ctypes.c_uint64)
@@ -321,6 +322,12 @@ _lib.sandlock_handle_pending.argtypes = [_c_handle_p]
 
 _lib.sandlock_image_pull.restype = ctypes.c_void_p
 _lib.sandlock_image_pull.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+
+_lib.sandlock_profile_resolve.restype = ctypes.c_void_p
+_lib.sandlock_profile_resolve.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+
+_lib.sandlock_profile_dir.restype = ctypes.c_void_p
+_lib.sandlock_profile_dir.argtypes = []
 
 _lib.sandlock_handle_upper_dir.restype = ctypes.c_void_p
 _lib.sandlock_handle_upper_dir.argtypes = [_c_handle_p]
@@ -795,6 +802,19 @@ def pull_image(reference: str, cache_dir: str | os.PathLike | None = None) -> Im
     )
 
 
+def resolve_profile(text: str) -> dict:
+    """Parse a TOML profile with the core parser; raises ValueError."""
+    err = ctypes.c_void_p()
+    out = _lib.sandlock_profile_resolve(_encode(text), ctypes.byref(err))
+    if not out:
+        raise ValueError(_take_string(err.value) or "invalid profile")
+    return json.loads(_take_string(out))
+
+
+def profile_dir() -> str:
+    return _take_string(_lib.sandlock_profile_dir())
+
+
 def _image_to_json(image: Image) -> str:
     c = image.config
     return json.dumps({
@@ -1120,7 +1140,7 @@ class _NativePolicy:
     # is Python-side only; no_coredump is a Python convenience alias).
     _HANDLED_FIELDS: set[str] = {
         "fs_writable", "fs_readable", "fs_denied", "fs_storage",
-        "workdir", "cwd", "chroot", "image", "fs_mount", "on_exit", "on_error",
+        "workdir", "cwd", "chroot", "image", "fs_mount", "fs_mount_ro", "on_exit", "on_error",
         "max_memory", "max_disk", "max_processes", "max_cpu", "num_cpus",
         "cpu_cores", "gpu_devices",
         "net_allow", "net_deny", "net_allow_bind", "net_deny_bind",
@@ -1171,6 +1191,8 @@ class _NativePolicy:
             b = _b_image(b, _encode(_image_to_json(policy.image)))
         for vp, hp in (policy.fs_mount or {}).items():
             b = _b_fs_mount(b, _encode(str(vp)), _encode(str(hp)))
+        for vp, hp in (policy.fs_mount_ro or {}).items():
+            b = _b_fs_mount_ro(b, _encode(str(vp)), _encode(str(hp)))
 
         # COW branch actions (0=Commit, 1=Abort, 2=Keep, 3=Defer)
         _action_map = {"commit": 0, "abort": 1, "keep": 2, "defer": 3}
