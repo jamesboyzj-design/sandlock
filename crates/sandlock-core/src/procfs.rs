@@ -24,9 +24,11 @@
 pub(crate) mod net;
 mod sock_diag;
 pub(crate) mod net_dispatch;
+mod metadata;
 mod net_metadata;
 pub(crate) use net_dispatch::{handle_net_open, handle_net_directory};
-pub(crate) use net_metadata::{handle_net_metadata, handle_pinned_metadata};
+pub(crate) use metadata::handle_pinned_metadata;
+pub(crate) use net_metadata::handle_net_metadata;
 
 use std::collections::HashSet;
 use std::ffi::CString;
