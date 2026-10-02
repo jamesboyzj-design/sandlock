@@ -197,6 +197,20 @@ res, _ := sb.Run(ctx, "python3", "-c", "print('hello')")
 // Or the image's own command: sb.Run(ctx, img.Config.DefaultCmd()...)
 ```
 
+### Profiles
+
+TOML profiles are parsed by sandlock's own parser, the one the CLI uses, so a
+profile means the same thing to both. Named profiles live in `ProfileDir()`
+(`$XDG_CONFIG_HOME/sandlock/profiles`, default `~/.config/sandlock/profiles`).
+
+```go
+sb, err := sandlock.LoadProfile("build")        // or LoadProfileFile(path), ParseProfile(text)
+names, err := sandlock.ListProfiles()
+```
+
+A profile field the Go `Sandbox` cannot express (such as `[config].http_inject_ca`)
+is an error rather than silently dropped.
+
 ### Dynamic policy callbacks
 
 ```go
