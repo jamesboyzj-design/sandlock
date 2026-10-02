@@ -376,6 +376,31 @@ fn probe_metadata(path: &str, dirfd: i64, pid: u32, follow: bool) -> Result<Owne
     )
 }
 
+// The task's own link is followed as the kernel would; the rest of the path
+// still may not cross another magic link.
+fn probe_through_task_link(pid: i32, link: &str, tail: &str, follow: bool) -> Result<OwnedFd, i32> {
+    let nofollow = |last: bool| if last && !follow { libc::O_NOFOLLOW } else { 0 };
+    let target = CString::new(format!("/proc/{pid}/{link}")).unwrap();
+    let base = crate::seccomp::notif::openat2_at(
+        libc::AT_FDCWD,
+        &target,
+        (libc::O_PATH | libc::O_CLOEXEC | nofollow(tail.is_empty())) as u64,
+        0,
+        0,
+    )?;
+    if tail.is_empty() {
+        return Ok(base);
+    }
+    let tail = CString::new(tail).map_err(|_| libc::EINVAL)?;
+    crate::seccomp::notif::openat2_at(
+        base.as_raw_fd(),
+        &tail,
+        (libc::O_PATH | libc::O_CLOEXEC | nofollow(true)) as u64,
+        0,
+        0x02,
+    )
+}
+
 fn proc_task_entry(path: &str, caller_tid: i32, caller_tgid: i32) -> Option<(i32, i32, &str)> {
     let (task, mut rest) = path.strip_prefix("/proc/")?.split_once('/')?;
     let parent = match task {
@@ -439,14 +464,21 @@ pub(crate) async fn handle_pinned_metadata(
         .processes
         .tgid_of(notif.pid as i32)
         .unwrap_or(notif.pid as i32);
+    let sandbox_task = |(parent, pid, _): &(i32, i32, &str)| {
+        ctx.processes.contains(*parent)
+            && ctx.processes.contains(*pid)
+            && (*parent == *pid || ctx.processes.tgid_of(*pid) == Some(*parent))
+    };
     let tracked_proc = absolute
         .as_deref()
         .and_then(Path::to_str)
         .and_then(|path| proc_task_entry(path, notif.pid as i32, tgid))
-        .filter(|(parent, pid, _)| {
-            ctx.processes.contains(*parent)
-                && ctx.processes.contains(*pid)
-                && (*parent == *pid || ctx.processes.tgid_of(*pid) == Some(*parent))
+        .filter(sandbox_task);
+    let task_link = proc_task_entry(&path, notif.pid as i32, tgid)
+        .filter(sandbox_task)
+        .and_then(|(_, pid, entry)| {
+            let (link, tail) = entry.split_once('/').unwrap_or((entry, ""));
+            matches!(link, "cwd" | "exe" | "root").then_some((pid, link, tail))
         });
     let held_fd = if path.is_empty() {
         if request.flags & libc::AT_EMPTY_PATH as u32 == 0
@@ -487,20 +519,10 @@ pub(crate) async fn handle_pinned_metadata(
     }
     let probe = match held_fd {
         Some((pid, fd)) => crate::seccomp::notif::open_base_dir(pid, fd as i64),
-        None if tracked_proc
-            .is_some_and(|(_, _, entry)| matches!(entry, "cwd" | "exe" | "root")) =>
-        {
-            let (_, pid, entry) = tracked_proc.unwrap();
-            let target = CString::new(format!("/proc/{pid}/{entry}")).unwrap();
-            crate::seccomp::notif::openat2_at(
-                libc::AT_FDCWD,
-                &target,
-                (libc::O_PATH | libc::O_CLOEXEC | if follow { 0 } else { libc::O_NOFOLLOW }) as u64,
-                0,
-                0,
-            )
-        }
-        None => probe_metadata(&translated, request.dirfd, notif.pid, follow),
+        None => match task_link {
+            Some((pid, link, tail)) => probe_through_task_link(pid, link, tail, follow),
+            None => probe_metadata(&translated, request.dirfd, notif.pid, follow),
+        },
     };
     let mut fd = match probe {
         Ok(fd) => fd,
