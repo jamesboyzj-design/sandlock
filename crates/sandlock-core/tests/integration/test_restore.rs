@@ -214,3 +214,62 @@ async fn test_restore_glibc_vdso_program_resumes() {
         strays.len(),
     );
 }
+
+/// Restore under chroot. The stub reaches the child as a memfd, which has no
+/// path inside the rootfs, so the chroot exec handler must accept an image
+/// named by fd.
+#[tokio::test]
+async fn test_restore_resumes_inside_a_chroot() {
+    if cfg!(not(any(target_arch = "x86_64", target_arch = "riscv64"))) {
+        eprintln!("skipping: the restore engine is x86_64/riscv64 only");
+        return;
+    }
+
+    let rootfs = std::env::temp_dir().join(format!("sandlock-restore-chroot-{}", std::process::id()));
+    std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
+    std::fs::create_dir_all(rootfs.join("tmp")).unwrap();
+    std::fs::copy(helper_binary(), rootfs.join("usr/bin/rootfs-helper")).unwrap();
+    let counter = rootfs.join("tmp/clock.cnt");
+    let read_counter = || -> Option<u64> {
+        std::fs::read_to_string(&counter).ok().and_then(|s| s.trim().parse().ok())
+    };
+
+    let policy = Sandbox::builder()
+        .chroot(&rootfs)
+        .fs_read("/usr")
+        .fs_read("/tmp")
+        .fs_write("/tmp")
+        .build().unwrap();
+
+    let mut sb = policy.clone().with_name("chroot-restore-src");
+    {
+        let _stdio = StdioRedirect::to_file(&rootfs.join("tmp/helper.log"));
+        sb.spawn_interactive(&["/usr/bin/rootfs-helper", "clock-loop", "/tmp/clock.cnt"])
+            .await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let cp = sb.checkpoint().await.unwrap();
+    let baseline = read_counter().expect("counter file should exist with a value");
+    sb.kill().unwrap();
+    let _ = sb.wait().await;
+
+    std::fs::write(&counter, b"0\n").unwrap();
+    let mut sb2 = policy.clone().with_name("chroot-restore-dst");
+    let restored = sb2.restore_interactive(&cp).await.map(|_| ());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut advanced = false;
+    while restored.is_ok() && std::time::Instant::now() < deadline {
+        if read_counter().is_some_and(|v| v > baseline) {
+            advanced = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let _ = sb2.kill();
+    let _ = sb2.wait().await;
+    let _ = std::fs::remove_dir_all(&rootfs);
+
+    restored.expect("restore under chroot");
+    assert!(advanced, "restored process must resume inside the chroot past baseline {baseline}");
+}

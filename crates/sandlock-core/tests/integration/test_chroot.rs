@@ -2348,3 +2348,32 @@ async fn test_chroot_cow_symlink_stays_inside_the_rootfs() {
     let _ = fs::remove_dir_all(&host_dir);
     cleanup_rootfs(&rootfs);
 }
+
+/// fexecve names the image by fd, so the exec handler has no path to confine.
+/// Both an fd to a file inside the rootfs and a memfd copy, which has no path
+/// anywhere, must run instead of failing with EACCES.
+#[tokio::test]
+async fn test_chroot_fexecve_runs_an_image_held_by_fd() {
+    let rootfs = build_test_rootfs("fexecve");
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    for source in ["fd", "memfd"] {
+        let out = format!("fexecve-{source}-ok");
+        let r = policy
+            .clone()
+            .run(&[
+                "/usr/bin/rootfs-helper", "fexecve", "/usr/bin/rootfs-helper", source,
+                "rootfs-helper", "echo", out.as_str(),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            r.success() && r.stdout_str().unwrap_or("").contains(&out),
+            "fexecve from {source} should run the image, exit={:?} stderr: {}",
+            r.code(),
+            r.stderr_str().unwrap_or(""),
+        );
+    }
+
+    cleanup_rootfs(&rootfs);
+}

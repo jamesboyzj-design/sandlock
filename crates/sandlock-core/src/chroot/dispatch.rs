@@ -940,6 +940,97 @@ fn memfd_with_patched_interp(
 // execve/execveat handler
 // ============================================================
 
+fn open_exec_by_path(
+    notif: &SeccompNotif,
+    dirfd: i64,
+    rel_path: String,
+    ctx: &ChrootCtx<'_>,
+) -> Result<(RawFd, PathBuf), i32> {
+    // Build the full virtual path from dirfd + relative path.
+    let full_path = if Path::new(&rel_path).is_absolute() {
+        rel_path
+    } else {
+        let base = match dirfd as i32 {
+            libc::AT_FDCWD => virtual_cwd_of(notif, ctx),
+            _ => std::fs::read_link(format!("/proc/{}/fd/{}", notif.pid, dirfd))
+                .ok()
+                .and_then(|host| ctx.host_to_virtual(&host)),
+        };
+        match base {
+            Some(base) => base.join(&rel_path).to_string_lossy().to_string(),
+            None => return Err(libc::EACCES),
+        }
+    };
+
+    let virtual_path = crate::chroot::resolve::confine(&full_path);
+    if !ctx.can_read(&virtual_path) {
+        return Err(libc::EACCES);
+    }
+
+    // Open the binary directly via openat2(RESOLVE_IN_ROOT). Single atomic
+    // open confined to the chroot root (or mount target) — no resolve-then-reopen TOCTOU gap.
+    let (exec_root, exec_path) = if let Some((mt, sub)) = ctx.mount_target(&virtual_path) {
+        (mt.to_path_buf(), sub)
+    } else {
+        (ctx.root.to_path_buf(), virtual_path.to_string_lossy().to_string())
+    };
+    let src_fd = match openat2_in_root(
+        &exec_root,
+        &exec_path,
+        libc::O_RDONLY | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(fd) => fd,
+        Err(_) => return Err(libc::ENOENT),
+    };
+    Ok((src_fd, virtual_path))
+}
+
+/// fexecve: the guest names the image by an fd it holds, which need not have a
+/// path in the root (a memfd, or a file inherited from the host). Exec it when
+/// the path policy grants it, or when the guest could already read the bytes
+/// and so could copy them into a memfd of its own.
+fn open_exec_by_fd(
+    notif: &SeccompNotif,
+    fd: RawFd,
+    ctx: &ChrootCtx<'_>,
+) -> Result<(RawFd, PathBuf), i32> {
+    use std::os::unix::fs::MetadataExt;
+
+    if fd < 0 {
+        return Err(libc::EBADF);
+    }
+    let file = std::fs::File::from(
+        crate::seccomp::notif::dup_fd_from_pid(notif.pid, fd).map_err(|_| libc::EBADF)?,
+    );
+    let self_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+    let host = std::fs::read_link(&self_path).map_err(|_| libc::EBADF)?;
+    let meta = file.metadata().map_err(|_| libc::EBADF)?;
+    // A memfd's or deleted file's link text is not a path to it.
+    let at_host = std::fs::metadata(&host)
+        .is_ok_and(|m| m.dev() == meta.dev() && m.ino() == meta.ino());
+    let virtual_path = match ctx.host_to_virtual(&host).filter(|_| at_host) {
+        Some(vp) if ctx.can_read(&vp) => vp,
+        Some(_) => return Err(libc::EACCES),
+        None => {
+            let mode = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) }
+                & (libc::O_ACCMODE | libc::O_PATH);
+            if mode != libc::O_RDONLY && mode != libc::O_RDWR {
+                return Err(libc::EACCES);
+            }
+            host
+        }
+    };
+    // A private description: the guest's shares its offset with ours, and the
+    // PT_INTERP scan seeks.
+    let path = CString::new(self_path).map_err(|_| libc::EBADF)?;
+    let src_fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if src_fd < 0 {
+        return Err(libc::EACCES);
+    }
+    Ok((src_fd, virtual_path))
+}
+
 pub(crate) async fn handle_chroot_exec(
     notif: &SeccompNotif,
     chroot_state: &Arc<Mutex<ChrootState>>,
@@ -959,42 +1050,15 @@ pub(crate) async fn handle_chroot_exec(
         None => return NotifAction::Continue,
     };
 
-    // Build the full virtual path from dirfd + relative path.
-    let full_path = if Path::new(&rel_path).is_absolute() {
-        rel_path
+    let flags = if nr == libc::SYS_execveat { notif.data.args[4] as i32 } else { 0 };
+    let opened = if rel_path.is_empty() && flags & libc::AT_EMPTY_PATH != 0 {
+        open_exec_by_fd(notif, dirfd as i32, ctx)
     } else {
-        let base = match dirfd as i32 {
-            libc::AT_FDCWD => virtual_cwd_of(notif, ctx),
-            _ => std::fs::read_link(format!("/proc/{}/fd/{}", notif.pid, dirfd))
-                .ok()
-                .and_then(|host| ctx.host_to_virtual(&host)),
-        };
-        match base {
-            Some(base) => base.join(&rel_path).to_string_lossy().to_string(),
-            None => return NotifAction::Errno(libc::EACCES),
-        }
+        open_exec_by_path(notif, dirfd, rel_path, ctx)
     };
-
-    let virtual_path = crate::chroot::resolve::confine(&full_path);
-    if !ctx.can_read(&virtual_path) {
-        return NotifAction::Errno(libc::EACCES);
-    }
-
-    // Open the binary directly via openat2(RESOLVE_IN_ROOT). Single atomic
-    // open confined to the chroot root (or mount target) — no resolve-then-reopen TOCTOU gap.
-    let (exec_root, exec_path) = if let Some((mt, sub)) = ctx.mount_target(&virtual_path) {
-        (mt.to_path_buf(), sub)
-    } else {
-        (ctx.root.to_path_buf(), virtual_path.to_string_lossy().to_string())
-    };
-    let src_fd = match openat2_in_root(
-        &exec_root,
-        &exec_path,
-        libc::O_RDONLY | libc::O_CLOEXEC,
-        0,
-    ) {
-        Ok(fd) => fd,
-        Err(_) => return NotifAction::Errno(libc::ENOENT),
+    let (src_fd, virtual_path) = match opened {
+        Ok(r) => r,
+        Err(errno) => return NotifAction::Errno(errno),
     };
 
     // Read PT_INTERP from the binary. If it has one, open the image's
