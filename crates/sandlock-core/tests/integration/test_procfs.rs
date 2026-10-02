@@ -985,6 +985,7 @@ async fn test_root_and_cwd_magic_links_name_the_virtual_file() {
         "cd /etc && [ \"$(cat /proc/self/cwd/hostname)\" = \"$(cat /etc/hostname)\" ] && echo cwd-hostname; ",
         "[ \"$(cat /proc/$$/root/etc/hosts)\" = \"$(cat /etc/hosts)\" ] && echo pid-root-hosts; ",
         "[ -d /proc/self/root ] && [ -f /proc/self/root/etc/passwd ] && [ -f /proc/self/cwd/hostname ] ",
+        "&& [ -f /proc/self/./exe ] && [ -f /proc//self/root//etc/passwd ] ",
         "&& echo stat-through-links"
     );
     let (_, out) = run_sh(&policy, script).await;

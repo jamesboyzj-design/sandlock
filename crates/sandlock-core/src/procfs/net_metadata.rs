@@ -372,8 +372,13 @@ fn probe_metadata(path: &str, dirfd: i64, pid: u32, follow: bool) -> Result<Owne
         &path,
         (libc::O_PATH | libc::O_CLOEXEC | if follow { 0 } else { libc::O_NOFOLLOW }) as u64,
         0,
-        0x02,
+        crate::seccomp::notif::RESOLVE_NO_MAGICLINKS,
     )
+}
+
+fn task_link(entry: &str) -> Option<(&str, &str)> {
+    let (link, tail) = entry.split_once('/').unwrap_or((entry, ""));
+    matches!(link, "cwd" | "exe" | "root").then_some((link, tail.trim_start_matches('/')))
 }
 
 // The task's own link is followed as the kernel would; the rest of the path
@@ -397,27 +402,42 @@ fn probe_through_task_link(pid: i32, link: &str, tail: &str, follow: bool) -> Re
         &tail,
         (libc::O_PATH | libc::O_CLOEXEC | nofollow(true)) as u64,
         0,
-        0x02,
+        crate::seccomp::notif::RESOLVE_NO_MAGICLINKS,
     )
 }
 
+// Walks the /proc/<task>/ prefix as the kernel would and leaves the entry,
+// and everything after it, as spelled.
 fn proc_task_entry(path: &str, caller_tid: i32, caller_tgid: i32) -> Option<(i32, i32, &str)> {
-    let (task, mut rest) = path.strip_prefix("/proc/")?.split_once('/')?;
+    let mut prefix = Vec::new();
+    let mut rest = path.strip_prefix('/')?;
+    let (task, thread, entry) = loop {
+        let (component, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        match (prefix.as_slice(), component) {
+            (_, "" | ".") => {}
+            (_, "..") => {
+                prefix.pop();
+            }
+            (["proc", task], entry) if entry != "task" => break (*task, None, rest),
+            (["proc", task, "task", tid], _) => break (*task, Some(*tid), rest),
+            _ => prefix.push(component),
+        }
+        if tail.is_empty() {
+            return None;
+        }
+        rest = tail;
+    };
+    let positive = |id: &str| id.parse::<i32>().ok().filter(|id| *id > 0);
     let parent = match task {
         "self" | "thread-self" => caller_tgid,
-        _ => task.parse::<i32>().ok().filter(|pid| *pid > 0)?,
+        _ => positive(task)?,
     };
-    let mut pid = if task == "thread-self" {
-        caller_tid
-    } else {
-        parent
+    let pid = match thread {
+        Some(tid) => positive(tid)?,
+        None if task == "thread-self" => caller_tid,
+        None => parent,
     };
-    if let Some(thread) = rest.strip_prefix("task/") {
-        let (tid, tail) = thread.split_once('/')?;
-        pid = tid.parse::<i32>().ok().filter(|pid| *pid > 0)?;
-        rest = tail;
-    }
-    Some((parent, pid, rest))
+    Some((parent, pid, entry))
 }
 
 // The sealed snapshot name selects cosmetic metadata only, never access rights.
@@ -464,21 +484,16 @@ pub(crate) async fn handle_pinned_metadata(
         .processes
         .tgid_of(notif.pid as i32)
         .unwrap_or(notif.pid as i32);
-    let sandbox_task = |(parent, pid, _): &(i32, i32, &str)| {
-        ctx.processes.contains(*parent)
-            && ctx.processes.contains(*pid)
-            && (*parent == *pid || ctx.processes.tgid_of(*pid) == Some(*parent))
-    };
-    let tracked_proc = absolute
+    let joined =
+        super::joined_absolute(notif.pid, request.dirfd, &path, None, &[], &ctx.processes);
+    let task_entry = joined
         .as_deref()
         .and_then(Path::to_str)
-        .and_then(|path| proc_task_entry(path, notif.pid as i32, tgid))
-        .filter(sandbox_task);
-    let task_link = proc_task_entry(&path, notif.pid as i32, tgid)
-        .filter(sandbox_task)
-        .and_then(|(_, pid, entry)| {
-            let (link, tail) = entry.split_once('/').unwrap_or((entry, ""));
-            matches!(link, "cwd" | "exe" | "root").then_some((pid, link, tail))
+        .and_then(|joined| proc_task_entry(joined, notif.pid as i32, tgid))
+        .filter(|(parent, pid, _)| {
+            ctx.processes.contains(*parent)
+                && ctx.processes.contains(*pid)
+                && (*parent == *pid || ctx.processes.tgid_of(*pid) == Some(*parent))
         });
     let held_fd = if path.is_empty() {
         if request.flags & libc::AT_EMPTY_PATH as u32 == 0
@@ -494,7 +509,7 @@ pub(crate) async fn handle_pinned_metadata(
             .and_then(|p| super::own_fd_request(p, notif.pid as i32, tgid))
             .map(|fd| (notif.pid, fd))
             .or_else(|| {
-                let (_, pid, entry) = tracked_proc?;
+                let (_, pid, entry) = task_entry?;
                 let fd = entry.strip_prefix("fd/")?;
                 if !fd.bytes().all(|byte| byte.is_ascii_digit()) {
                     return None;
@@ -519,8 +534,8 @@ pub(crate) async fn handle_pinned_metadata(
     }
     let probe = match held_fd {
         Some((pid, fd)) => crate::seccomp::notif::open_base_dir(pid, fd as i64),
-        None => match task_link {
-            Some((pid, link, tail)) => probe_through_task_link(pid, link, tail, follow),
+        None => match task_entry.and_then(|(_, pid, entry)| Some((pid, task_link(entry)?))) {
+            Some((pid, (link, tail))) => probe_through_task_link(pid, link, tail, follow),
             None => probe_metadata(&translated, request.dirfd, notif.pid, follow),
         },
     };
@@ -705,6 +720,16 @@ mod tests {
             Some((8, 9, "exe"))
         );
         assert_eq!(proc_task_entry("/proc/-1/fd/1", 9, 8), None);
+        assert_eq!(proc_task_entry("/proc//self/./exe", 9, 8), Some((8, 8, "exe")));
+        assert_eq!(
+            proc_task_entry("/proc/42/task/43/../../fd/1", 9, 8),
+            Some((42, 42, "fd/1"))
+        );
+        assert_eq!(
+            proc_task_entry("/proc/self/cwd/a/../b/", 9, 8),
+            Some((8, 8, "cwd/a/../b/"))
+        );
+        assert_eq!(proc_task_entry("/proc/self/", 9, 8), None);
     }
 
     #[test]
