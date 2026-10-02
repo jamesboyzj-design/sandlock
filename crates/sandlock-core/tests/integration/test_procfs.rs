@@ -983,10 +983,13 @@ async fn test_root_and_cwd_magic_links_name_the_virtual_file() {
         "[ \"$(cat /proc/self/root/etc/hostname)\" = \"$(cat /etc/hostname)\" ] && echo root-hostname; ",
         "grep -c : /proc/self/root/proc/net/dev; ",
         "cd /etc && [ \"$(cat /proc/self/cwd/hostname)\" = \"$(cat /etc/hostname)\" ] && echo cwd-hostname; ",
-        "[ \"$(cat /proc/$$/root/etc/hosts)\" = \"$(cat /etc/hosts)\" ] && echo pid-root-hosts"
+        "[ \"$(cat /proc/$$/root/etc/hosts)\" = \"$(cat /etc/hosts)\" ] && echo pid-root-hosts; ",
+        "[ -d /proc/self/root ] && [ -f /proc/self/root/etc/passwd ] && [ -f /proc/self/cwd/hostname ] ",
+        "&& [ -f /proc/self/./exe ] && [ -f /proc//self/root//etc/passwd ] ",
+        "&& echo stat-through-links"
     );
     let (_, out) = run_sh(&policy, script).await;
-    assert_eq!(out, "root-hostname\n1\ncwd-hostname\npid-root-hosts");
+    assert_eq!(out, "root-hostname\n1\ncwd-hostname\npid-root-hosts\nstat-through-links");
 }
 
 #[tokio::test]

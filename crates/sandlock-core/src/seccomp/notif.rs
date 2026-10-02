@@ -423,7 +423,7 @@ fn is_denied_with_symlink_resolve(
 /// `RESOLVE_NO_MAGICLINKS` — forbid `/proc` magic-link redirection during
 /// on-behalf resolution while still following ordinary symlinks the way the
 /// child's own open would.
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+pub(crate) const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
 const RESOLVE_IN_ROOT: u64 = 0x10;
