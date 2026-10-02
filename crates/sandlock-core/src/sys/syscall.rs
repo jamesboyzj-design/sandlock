@@ -228,3 +228,13 @@ pub fn memfd_create(name: &str, flags: u32) -> io::Result<OwnedFd> {
     };
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
+
+/// A memfd that will be exec'd. `MFD_EXEC` keeps a `vm.memfd_noexec=1` host
+/// from sealing it non-executable; kernels before 6.3 reject the flag, and
+/// their memfds are always executable.
+pub fn memfd_create_exec(name: &str, flags: u32) -> io::Result<OwnedFd> {
+    memfd_create(name, flags | libc::MFD_EXEC).or_else(|e| match e.raw_os_error() {
+        Some(libc::EINVAL) => memfd_create(name, flags),
+        _ => Err(e),
+    })
+}

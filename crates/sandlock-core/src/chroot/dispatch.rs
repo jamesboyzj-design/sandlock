@@ -892,7 +892,7 @@ fn memfd_with_patched_interp(
     };
 
     // Create memfd
-    let memfd = crate::sys::syscall::memfd_create("sandlock-exec", 0).ok()?;
+    let memfd = crate::sys::syscall::memfd_create_exec("sandlock-exec", 0).ok()?;
     let mfd = memfd.as_raw_fd();
 
     // Set size

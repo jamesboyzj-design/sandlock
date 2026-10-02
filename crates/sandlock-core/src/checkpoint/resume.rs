@@ -124,24 +124,15 @@ fn memfd_with(bytes: &[u8]) -> io::Result<RawFd> {
     Ok(fd)
 }
 
-/// A sealed, executable memfd holding [`STUB_ELF`]. `MFD_EXEC` keeps a
-/// `vm.memfd_noexec=1` host from sealing it non-executable; kernels before 6.3
-/// reject the flag, and their memfds are always executable.
+/// A sealed, executable memfd holding [`STUB_ELF`].
 fn stub_memfd() -> io::Result<RawFd> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, IntoRawFd};
 
-    let name = c"sandlock-restore-stub";
-    let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
-    let mut fd = unsafe { libc::memfd_create(name.as_ptr(), flags | libc::MFD_EXEC) };
-    if fd < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-        fd = unsafe { libc::memfd_create(name.as_ptr(), flags) };
-    }
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut file = std::fs::File::from(fd);
+    let mut file = std::fs::File::from(crate::sys::syscall::memfd_create_exec(
+        "sandlock-restore-stub",
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+    )?);
     file.write_all(STUB_ELF)?;
     let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
