@@ -233,6 +233,82 @@ class TestFsMount:
             "rootfs /work/sentinel.txt should be untouched"
 
 
+class TestFsMountReadOnly:
+    def _ro_policy(self, rootfs, work_dir):
+        return Sandbox(
+            chroot=str(rootfs),
+            fs_mount_ro={"/work": str(work_dir)},
+            fs_readable=list(_FS_READABLE),
+            clean_env=True,
+            env={"PATH": "/bin:/usr/bin"},
+        )
+
+    def test_fs_mount_ro_reads(self, rootfs, tmp_path):
+        work_dir = tmp_path / "hostwork"
+        work_dir.mkdir()
+        (work_dir / "hello.txt").write_text("hello from host\n")
+
+        result = self._ro_policy(rootfs, work_dir).run(["cat", "/work/hello.txt"])
+        assert result.success, f"failed: {result.stderr}"
+        assert b"hello from host" in result.stdout
+
+    def test_fs_mount_ro_denies_writes(self, rootfs, tmp_path):
+        work_dir = tmp_path / "hostwork"
+        work_dir.mkdir()
+        (work_dir / "hello.txt").write_text("original")
+
+        policy = self._ro_policy(rootfs, work_dir)
+        result = policy.run(["write", "/work/hello.txt", "HACKED"])
+        assert not result.success
+        assert b"Permission denied" in result.stderr
+        result = policy.run(["write", "/work/new.txt", "HACKED"])
+        assert not result.success
+        assert (work_dir / "hello.txt").read_text() == "original"
+        assert not (work_dir / "new.txt").exists()
+
+    def test_fs_mount_ro_from_profile(self, rootfs, tmp_path):
+        # Issue #174: a ':ro' profile entry must mount the named directory
+        # read-only, never a sibling literally named '<host>:ro'.
+        from sandlock._profile import load_profile_path
+
+        work_dir = tmp_path / "hostwork"
+        work_dir.mkdir()
+        (work_dir / "file.txt").write_text("original content")
+        decoy = tmp_path / "hostwork:ro"
+        decoy.mkdir()
+        (decoy / "file.txt").write_text("decoy")
+
+        profile = tmp_path / "prof.toml"
+        readable = ", ".join(f'"{p}"' for p in _FS_READABLE)
+        profile.write_text(
+            "[filesystem]\n"
+            f'chroot = "{rootfs}"\n'
+            f"read = [{readable}]\n"
+            f'mount = ["/work:{work_dir}:ro"]\n'
+            "[program]\n"
+            "clean_env = true\n"
+            'env = { PATH = "/bin:/usr/bin" }\n'
+        )
+        policy = load_profile_path(profile)
+
+        result = policy.run(["cat", "/work/file.txt"])
+        assert result.success, f"failed: {result.stderr}"
+        assert result.stdout == b"original content"
+        result = policy.run(["write", "/work/file.txt", "HACKED"])
+        assert not result.success
+        assert (work_dir / "file.txt").read_text() == "original content"
+        assert (decoy / "file.txt").read_text() == "decoy"
+
+    def test_fs_mount_ro_conflict_rejected(self, rootfs, tmp_path):
+        policy = Sandbox(
+            chroot=str(rootfs),
+            fs_mount={"/work": str(tmp_path)},
+            fs_mount_ro={"/work": str(tmp_path)},
+        )
+        with pytest.raises(RuntimeError, match="mounted more than once"):
+            policy.run(["true"])
+
+
 class TestFsMountCow:
     """Tests for fs_mount combined with COW (copy-on-write) workdir."""
 

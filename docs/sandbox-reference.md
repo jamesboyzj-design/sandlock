@@ -36,7 +36,7 @@ sandbox = Sandbox(
 
     # [filesystem]
     fs_readable=(), fs_writable=(), fs_denied=(),
-    chroot=None, fs_mount={},
+    chroot=None, fs_mount={}, fs_mount_ro={},
     on_exit=BranchAction.COMMIT, on_error=BranchAction.ABORT,
 
     # [network]
@@ -319,7 +319,8 @@ filesystem isolation.
 | `fs_writable`  | `write`     | `Sequence[str]`     | `()`                    | Paths the sandbox may read and write.                                                                                        |
 | `fs_denied`    | `deny`      | `Sequence[str]`     | `()`                    | Paths explicitly denied (neither read nor write), even if implied by a broader rule.                                         |
 | `chroot`       | `chroot`    | `str \| None`       | `None`                  | Path to `chroot` into before applying other confinement.                                                                     |
-| `fs_mount`     | `mount`     | `Mapping[str, str]` | `{}`                    | Map virtual paths inside the chroot to host directories. Python form: `{"/work": "/host/sandbox/work"}`. TOML form: list of `"VIRTUAL:HOST"` strings. A trailing `:ro` (or the default `:rw`) selects a read-only mount: the CLI honours it in `--fs-mount` and in profiles, and `sandlock inspect --toml` writes `:ro` back out. The Python SDK rejects such entries with `PolicyError`, since its mapping cannot express a read-only mount; load the profile with the CLI (`sandlock run --profile-file <path>`), or use the C ABI's `sandlock_sandbox_builder_fs_mount_ro`. |
+| `fs_mount`     | `mount`     | `Mapping[str, str]` | `{}`                    | Map virtual paths inside the chroot to host directories. Python form: `{"/work": "/host/sandbox/work"}`. TOML form: list of `"VIRTUAL:HOST"` strings. A trailing `:ro` (or the default `:rw`) selects a read-only mount: the CLI honours it in `--fs-mount` and in profiles, and `sandlock inspect --toml` writes `:ro` back out. The Python SDK loads `:ro` entries into `fs_mount_ro`. |
+| `fs_mount_ro`  | `mount`     | `Mapping[str, str]` | `{}`                    | Same as `fs_mount`, but writes under the virtual path fail with `EACCES`. Filled from `mount` entries ending in `:ro`. A virtual path may not appear in both mappings. |
 | `on_exit`      | `on_exit`   | `BranchAction`      | `BranchAction.COMMIT`   | Branch action on normal sandbox exit.                                                                                        |
 | `on_error`     | `on_error`  | `BranchAction`      | `BranchAction.ABORT`    | Branch action on sandbox error or exception.                                                                                 |
 

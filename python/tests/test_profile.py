@@ -1,82 +1,80 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for sandlock._profile (sectioned schema)."""
+"""Tests for sandlock._profile (sectioned schema, parsed by the core)."""
 
 from __future__ import annotations
 
-import os
-import re
 import textwrap
 
 import pytest
 
 from sandlock._profile import (
     list_profiles,
+    load_profile,
     load_profile_path,
     merge_cli_overrides,
-    policy_from_dict,
+    policy_from_toml,
     profiles_dir,
 )
 from sandlock.exceptions import PolicyError
 from sandlock.sandbox import BranchAction, Sandbox
 
 
-class TestPolicyFromDict:
-    def test_empty_dict(self):
-        p = policy_from_dict({})
-        assert p == Sandbox()
+def load(text: str) -> Sandbox:
+    return policy_from_toml(textwrap.dedent(text))
+
+
+class TestPolicyFromToml:
+    def test_empty_profile(self):
+        assert load("") == Sandbox()
 
     def test_filesystem_section(self):
-        p = policy_from_dict({
-            "filesystem": {
-                "read": ["/usr", "/lib"],
-                "write": ["/tmp"],
-                "deny": ["/proc/sys"],
-            },
-        })
+        p = load("""
+            [filesystem]
+            read = ["/usr", "/lib"]
+            write = ["/tmp"]
+            deny = ["/proc/sys"]
+        """)
         assert p.fs_readable == ["/usr", "/lib"]
         assert p.fs_writable == ["/tmp"]
         assert p.fs_denied == ["/proc/sys"]
 
     def test_program_section(self):
-        p = policy_from_dict({
-            "program": {
-                "env": {"FOO": "bar", "BAZ": "qux"},
-                "uid": 0,
-                "clean_env": True,
-                "no_coredump": True,
-            },
-        })
+        p = load("""
+            [program]
+            env = { FOO = "bar", BAZ = "qux" }
+            uid = 0
+            gid = 0
+            clean_env = true
+            no_coredump = true
+        """)
         assert p.env == {"FOO": "bar", "BAZ": "qux"}
-        assert p.uid == 0
+        assert (p.uid, p.gid) == (0, 0)
         assert p.clean_env is True
         assert p.no_coredump is True
 
-    def test_program_exec_and_args_are_silently_ignored(self):
-        # exec/args are runtime program identity, not Sandbox config.
-        # Loading a profile with them should succeed but not place them
-        # anywhere on the resulting Sandbox.
-        p = policy_from_dict({
-            "program": {
-                "exec": "/bin/true",
-                "args": ["--flag"],
-                "uid": 1000,
-            },
-        })
-        assert p.uid == 1000
-        # No side-effect on Sandbox itself; we just need the load to succeed.
-        assert isinstance(p, Sandbox)
+    def test_uid_without_gid_raises(self):
+        with pytest.raises(PolicyError, match="uid and program.gid must both be set"):
+            load("[program]\nuid = 1000\n")
+
+    def test_program_exec_and_args_are_not_returned(self):
+        p = load("""
+            [program]
+            exec = "/bin/true"
+            args = ["--flag"]
+            clean_env = true
+        """)
+        assert p.clean_env is True
 
     def test_limits_section(self):
-        p = policy_from_dict({
-            "limits": {
-                "memory": "512M",
-                "processes": 10,
-                "open_files": 256,
-                "cpu": 80,
-                "disk": "256M",
-                "cpu_cores": [0, 1],
-            },
-        })
+        p = load("""
+            [limits]
+            memory = "512M"
+            processes = 10
+            open_files = 256
+            cpu = 80
+            disk = "256M"
+            cpu_cores = [0, 1]
+        """)
         assert p.max_memory == "512M"
         assert p.max_processes == 10
         assert p.max_open_files == 256
@@ -85,191 +83,158 @@ class TestPolicyFromDict:
         assert list(p.cpu_cores) == [0, 1]
 
     def test_network_section(self):
-        p = policy_from_dict({
-            "network": {
-                "allow_bind": [8080],
-                "allow": ["api.example.com:443", ":8080"],
-                "port_remap": True,
-            },
-        })
-        assert p.net_allow_bind == ["8080"]  # ints coerced to strings
+        p = load("""
+            [network]
+            allow_bind = [8080, "9000-9002"]
+            deny_bind = [22]
+            allow = ["api.example.com:443", ":8080"]
+            deny = ["10.0.0.0/8"]
+            port_remap = true
+        """)
+        assert list(p.net_allow_bind) == [8080, "9000-9002"]
+        assert list(p.net_deny_bind) == [22]
         assert list(p.net_allow) == ["api.example.com:443", ":8080"]
+        assert list(p.net_deny) == ["10.0.0.0/8"]
         assert p.port_remap is True
 
-    def test_network_allow_bind_wildcard(self):
-        p = policy_from_dict({
-            "network": {"allow_bind": ["*"]},
-        })
-        assert p.net_allow_bind == ["*"]
-
-    def test_network_deny_section(self):
-        p = policy_from_dict({
-            "network": {"deny": ["10.0.0.0/8", "169.254.169.254:80"]},
-        })
-        assert list(p.net_deny) == ["10.0.0.0/8", "169.254.169.254:80"]
-
-    def test_network_deny_bind_section(self):
-        p = policy_from_dict({
-            "network": {"deny_bind": [8080, "9000-9002"]},
-        })
-        assert list(p.net_deny_bind) == [8080, "9000-9002"]
+    def test_bind_wildcard_with_ports_raises(self):
+        # The old Python parser let this through until run time.
+        with pytest.raises(PolicyError, match="wildcard"):
+            load('[network]\nallow_bind = [8080, "*"]\n')
 
     def test_http_section(self):
-        p = policy_from_dict({
-            "http": {
-                "ports": [80, 443],
-                "allow": ["GET api.internal/v1/*"],
-                "deny": ["* */admin/*"],
-            },
-        })
+        p = load("""
+            [http]
+            ports = [80, 443]
+            allow = ["GET api.internal/v1/*"]
+            deny = ["* */admin/*"]
+        """)
         assert list(p.http_ports) == [80, 443]
         assert list(p.http_allow) == ["GET api.internal/v1/*"]
         assert list(p.http_deny) == ["* */admin/*"]
 
     def test_syscalls_section(self):
-        p = policy_from_dict({
-            "syscalls": {
-                "extra_allow": ["sysv_ipc"],
-                "extra_deny": ["ptrace"],
-            },
-        })
+        p = load("""
+            [syscalls]
+            extra_allow = ["sysv_ipc"]
+            extra_deny = ["ptrace"]
+        """)
         assert list(p.extra_allow_syscalls) == ["sysv_ipc"]
         assert list(p.extra_deny_syscalls) == ["ptrace"]
 
     def test_config_section(self):
-        p = policy_from_dict({
-            "config": {
-                "http_ca": "/etc/sandlock/ca.pem",
-                "http_key": "/etc/sandlock/ca.key",
-                "fs_storage": "/var/sandlock/store",
-                "workdir": "/var/sandlock/work",
-            },
-        })
-        assert p.http_ca == "/etc/sandlock/ca.pem"
-        assert p.http_key == "/etc/sandlock/ca.key"
+        p = load("""
+            [config]
+            fs_storage = "/var/sandlock/store"
+            workdir = "/var/sandlock/work"
+        """)
         assert p.fs_storage == "/var/sandlock/store"
         assert p.workdir == "/var/sandlock/work"
 
     def test_determinism_section(self):
-        p = policy_from_dict({
-            "determinism": {
-                "random_seed": 42,
-                "deterministic_dirs": True,
-                "no_randomize_memory": True,
-            },
-        })
+        p = load("""
+            [determinism]
+            random_seed = 42
+            deterministic_dirs = true
+            no_randomize_memory = true
+        """)
         assert p.random_seed == 42
         assert p.deterministic_dirs is True
         assert p.no_randomize_memory is True
 
-    def test_filesystem_isolation_key_rejected(self):
-        with pytest.raises(PolicyError, match=r"unknown field\(s\) in \[filesystem\]"):
-            policy_from_dict({"filesystem": {"isolation": "none"}})
-
     def test_filesystem_branch_actions(self):
-        p = policy_from_dict({
-            "filesystem": {"on_exit": "abort", "on_error": "keep"},
-        })
+        p = load("""
+            [filesystem]
+            on_exit = "abort"
+            on_error = "keep"
+        """)
         assert p.on_exit == BranchAction.ABORT
         assert p.on_error == BranchAction.KEEP
 
-    def test_filesystem_mount_strings_to_dict(self):
-        p = policy_from_dict({
-            "filesystem": {"mount": ["/data:/srv/redis-data", "/cache:/srv/cache"]},
-        })
-        assert p.fs_mount == {"/data": "/srv/redis-data", "/cache": "/srv/cache"}
+    def test_invalid_branch_action_raises(self):
+        with pytest.raises(PolicyError, match=r"\[filesystem\]\.on_exit"):
+            load('[filesystem]\non_exit = "invalid"\n')
+
+    def test_invalid_memory_size_raises(self):
+        with pytest.raises(PolicyError):
+            load('[limits]\nmemory = "lots"\n')
 
     def test_unknown_section_raises(self):
-        with pytest.raises(PolicyError, match="unknown section"):
-            policy_from_dict({"bogus": {}})
+        with pytest.raises(PolicyError, match="unknown field `bogus`"):
+            load("[bogus]\n")
 
     def test_unknown_field_in_section_raises(self):
-        with pytest.raises(PolicyError, match=r"unknown field\(s\) in \[filesystem\]"):
-            policy_from_dict({"filesystem": {"bogus": True}})
-
-    def test_section_must_be_table(self):
-        with pytest.raises(PolicyError, match=r"\[filesystem\] must be a TOML table"):
-            policy_from_dict({"filesystem": "not-a-table"})
+        with pytest.raises(PolicyError, match="unknown field `isolation`"):
+            load('[filesystem]\nisolation = "none"\n')
 
     def test_type_mismatch_raises(self):
-        with pytest.raises(PolicyError, match=r"\[program\]\.clean_env expected bool"):
-            policy_from_dict({"program": {"clean_env": "yes"}})
+        with pytest.raises(PolicyError, match="clean_env"):
+            load('[program]\nclean_env = "yes"\n')
 
-    def test_invalid_branch_action_raises(self):
-        with pytest.raises(PolicyError, match=r"\[filesystem\]\.on_exit must be"):
-            policy_from_dict({"filesystem": {"on_exit": "invalid"}})
+    def test_old_flat_format_rejected(self):
+        with pytest.raises(PolicyError, match="unknown field `fs_readable`"):
+            load('fs_readable = ["/usr"]\n')
 
-    def test_mount_missing_colon_raises(self):
-        with pytest.raises(PolicyError, match=r"must be 'VIRTUAL:HOST'"):
-            policy_from_dict({"filesystem": {"mount": ["nocolon"]}})
+    def test_error_names_the_source(self):
+        with pytest.raises(PolicyError, match="^my.toml: "):
+            policy_from_toml("[bogus]\n", source="my.toml")
 
-    def test_mount_empty_half_raises(self):
-        with pytest.raises(PolicyError, match=r"both VIRTUAL and HOST"):
-            policy_from_dict({"filesystem": {"mount": [":/host"]}})
 
-    def test_mount_ro_suffix_raises(self):
-        # The CLI accepts 'VIRTUAL:HOST:ro'; the SDK cannot express a
-        # read-only mount, so it must refuse instead of folding ':ro' into
-        # the host path.
-        with pytest.raises(
-            PolicyError, match=r"':ro' suffix, which the Python SDK cannot honour"
-        ):
-            policy_from_dict({"filesystem": {"mount": ["/work:/host:ro"]}})
+class TestMount:
+    def test_mount_strings_to_dict(self):
+        p = load('[filesystem]\nmount = ["/data:/srv/redis-data", "/cache:/srv/cache"]\n')
+        assert p.fs_mount == {"/data": "/srv/redis-data", "/cache": "/srv/cache"}
+        assert p.fs_mount_ro == {}
 
-    def test_mount_rw_suffix_raises(self):
-        # ':rw' is refused for a different reason: it is outside this
-        # parser's grammar, not something the SDK cannot express. The
-        # message must not claim a read-only mount is involved.
-        with pytest.raises(
-            PolicyError, match=r"':rw' suffix, which is the sandlock CLI's default"
-        ):
-            policy_from_dict({"filesystem": {"mount": ["/work:/host:rw"]}})
+    def test_ro_suffix_selects_read_only(self):
+        p = load('[filesystem]\nmount = ["/work:/host:ro"]\n')
+        assert p.fs_mount == {}
+        assert p.fs_mount_ro == {"/work": "/host"}
 
-    def test_mount_rw_error_does_not_claim_a_read_only_mount(self):
-        with pytest.raises(PolicyError) as excinfo:
-            policy_from_dict({"filesystem": {"mount": ["/work:/host:rw"]}})
-        message = str(excinfo.value)
-        assert "read-only" not in message, message
-        assert "remove it" in message
-
-    def test_mount_suffix_error_names_spec_and_remedy(self):
-        with pytest.raises(PolicyError) as excinfo:
-            policy_from_dict({"filesystem": {"mount": ["/work:/host:ro"]}})
-        message = str(excinfo.value)
-        assert "'/work:/host:ro'" in message
-        # The profile is often one the CLI itself wrote, so the remedy is
-        # to run it with the CLI, not to retype it as a flag.
-        assert "sandlock run --profile-file <path>" in message
-        assert "sandlock run -p <name>" in message
-
-    @pytest.mark.parametrize("spec", ["/work:/host:ro", "/work:/host:rw"])
-    def test_mount_suffix_error_suggests_a_runnable_command(self, spec):
-        # Both flags live on the `run` subcommand (RunArgs in
-        # crates/sandlock-cli/src/main.rs), not on the top-level parser:
-        # `sandlock --profile-file p.toml` exits 2 with "unexpected
-        # argument". A loud rejection that routes the user to a command
-        # which cannot run is not a remedy, so the suggestion must always
-        # carry the subcommand.
-        with pytest.raises(PolicyError) as excinfo:
-            policy_from_dict({"filesystem": {"mount": [spec]}})
-        message = str(excinfo.value)
-        quoted = re.findall(r"'(sandlock[^']*)'", message)
-        assert quoted, f"no quoted sandlock invocation in {message!r}"
-        for invocation in quoted:
-            assert invocation.startswith("sandlock run "), message
-
-    def test_mount_without_suffix_still_parses(self):
-        # Control: the rejection must not touch ordinary specs.
-        p = policy_from_dict({"filesystem": {"mount": ["/work:/host"]}})
+    def test_rw_suffix_is_the_default(self):
+        p = load('[filesystem]\nmount = ["/work:/host:rw"]\n')
         assert p.fs_mount == {"/work": "/host"}
 
-    def test_mount_colon_in_host_without_suffix_still_parses(self):
-        # Only a trailing ':ro'/':rw' is refused: inner colons belong to the
-        # host path (core splits on the first colon), and ':root' is not ':ro'.
-        p = policy_from_dict({
-            "filesystem": {"mount": ["/v:/a:b", "/v2:/host:root"]},
-        })
-        assert p.fs_mount == {"/v": "/a:b", "/v2": "/host:root"}
+    def test_suffix_does_not_leak_into_host(self):
+        p = load('[filesystem]\nmount = ["/v:/a:b:ro", "/v2:/c:d:rw", "/v3:/host:root"]\n')
+        assert p.fs_mount_ro == {"/v": "/a:b"}
+        assert p.fs_mount == {"/v2": "/c:d", "/v3": "/host:root"}
+
+    @pytest.mark.parametrize("spec", ["nocolon", "/work:ro", ":/host"])
+    def test_malformed_spec_raises(self, spec):
+        with pytest.raises(PolicyError, match="invalid mount spec"):
+            load(f'[filesystem]\nmount = ["{spec}"]\n')
+
+    def test_same_virtual_path_twice_raises(self):
+        with pytest.raises(PolicyError, match="mounted more than once"):
+            load('[filesystem]\nmount = ["/work:/a", "/work:/b:ro"]\n')
+
+
+class TestExpansion:
+    # Expansion itself is tested in the core against the shared fixture;
+    # these only check that the SDK receives the expanded values.
+    def test_path_fields_expand(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/alice")
+        p = load("""
+            [filesystem]
+            read = ["${HOME}/src"]
+            mount = ["/work:${HOME}/host:ro"]
+            [program]
+            cwd = "${HOME}/src"
+        """)
+        assert p.fs_readable == ["/home/alice/src"]
+        assert p.cwd == "/home/alice/src"
+        assert p.fs_mount_ro == {"/work": "/home/alice/host"}
+
+    def test_error_names_the_field(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/home/alice")
+        with pytest.raises(PolicyError, match=r"\[filesystem\]\.read"):
+            load('[filesystem]\nread = ["${NOPE}"]\n')
+
+    def test_home_under_chroot_is_an_error(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/env/home")
+        with pytest.raises(PolicyError, match="chroot"):
+            load('[filesystem]\nchroot = "/jail"\nread = ["${HOME}/src"]\n')
 
 
 class TestLoadProfilePath:
@@ -297,44 +262,56 @@ class TestLoadProfilePath:
     def test_invalid_toml_raises(self, tmp_path):
         profile = tmp_path / "bad.toml"
         profile.write_text("not valid [[[toml")
-        with pytest.raises(PolicyError, match="invalid TOML"):
+        with pytest.raises(PolicyError, match="TOML parse error"):
             load_profile_path(profile)
 
-    def test_unknown_section_in_file_raises(self, tmp_path):
+    def test_error_names_the_file(self, tmp_path):
         profile = tmp_path / "bad.toml"
         profile.write_text("[typo]\n")
-        with pytest.raises(PolicyError, match="unknown section"):
+        with pytest.raises(PolicyError, match=str(profile)):
             load_profile_path(profile)
 
-    def test_old_flat_format_rejected(self, tmp_path):
-        # Pre-Phase-3 profiles used flat top-level keys. They are now
-        # rejected (sectioned schema only). Pre-1.0 hard break.
-        profile = tmp_path / "old.toml"
-        profile.write_text('fs_readable = ["/usr"]\n')
-        with pytest.raises(PolicyError, match="unknown section"):
-            load_profile_path(profile)
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(PolicyError):
+            load_profile_path(tmp_path / "absent.toml")
 
 
-class TestListProfiles:
-    def test_list_profiles(self, tmp_path, monkeypatch):
-        import sandlock._profile as mod
-        monkeypatch.setattr(mod, "_PROFILES_DIR", tmp_path)
+class TestProfilesDir:
+    @pytest.fixture
+    def config_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        directory = tmp_path / ".config" / "sandlock" / "profiles"
+        directory.mkdir(parents=True)
+        return directory
 
-        (tmp_path / "build.toml").write_text("[program]\nuid = 0\n")
-        (tmp_path / "dev.toml").write_text("[program]\nclean_env = true\n")
-        (tmp_path / "not-toml.txt").write_text("ignored")
+    def test_lives_under_home(self, config_home):
+        # The CLI resolves the directory this way, so both must agree.
+        assert profiles_dir() == config_home
 
+    def test_xdg_config_home_is_not_consulted(self, config_home, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+        assert profiles_dir() == config_home
+
+    def test_list_profiles(self, config_home):
+        (config_home / "build.toml").write_text("[program]\nclean_env = true\n")
+        (config_home / "dev.toml").write_text("[program]\nclean_env = true\n")
+        (config_home / "not-toml.txt").write_text("ignored")
         assert list_profiles() == ["build", "dev"]
 
-    def test_list_profiles_empty(self, tmp_path, monkeypatch):
-        import sandlock._profile as mod
-        monkeypatch.setattr(mod, "_PROFILES_DIR", tmp_path)
+    def test_list_profiles_empty(self, config_home):
         assert list_profiles() == []
 
     def test_list_profiles_no_dir(self, tmp_path, monkeypatch):
-        import sandlock._profile as mod
-        monkeypatch.setattr(mod, "_PROFILES_DIR", tmp_path / "nonexistent")
+        monkeypatch.setenv("HOME", str(tmp_path))
         assert list_profiles() == []
+
+    def test_load_profile_by_name(self, config_home):
+        (config_home / "dev.toml").write_text('[filesystem]\nmount = ["/w:/h:ro"]\n')
+        assert load_profile("dev").fs_mount_ro == {"/w": "/h"}
+
+    def test_load_missing_profile_raises(self, config_home):
+        with pytest.raises(PolicyError, match="profile not found"):
+            load_profile("absent")
 
 
 class TestMergeCliOverrides:
@@ -342,7 +319,7 @@ class TestMergeCliOverrides:
         base = Sandbox(max_memory="256M", uid=0)
         result = merge_cli_overrides(base, {"max_memory": "1G"})
         assert result.max_memory == "1G"
-        assert result.uid == 0  # unchanged
+        assert result.uid == 0
 
     def test_list_append(self):
         base = Sandbox(fs_readable=["/usr", "/lib"])
@@ -353,118 +330,3 @@ class TestMergeCliOverrides:
         base = Sandbox(clean_env=False)
         result = merge_cli_overrides(base, {"clean_env": True})
         assert result.clean_env is True
-
-
-def test_profiles_dir_is_a_path():
-    assert profiles_dir().is_absolute() or str(profiles_dir()).startswith("~")
-
-
-class TestExpansion:
-    @staticmethod
-    def _fixture():
-        from pathlib import Path
-
-        # _profile binds `tomllib` to tomli on 3.10, so reuse its binding
-        # rather than importing tomllib directly.
-        from sandlock._profile import tomllib
-
-        path = (
-            Path(__file__).resolve().parents[2]
-            / "tests"
-            / "fixtures"
-            / "profile_expansion.toml"
-        )
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-
-    def test_shared_fixture_cases(self):
-        from sandlock._profile import _expand
-
-        data = self._fixture()
-        default_home = data["home"]
-        for case in data["case"]:
-            home = case.get("home", default_home)
-            if "expect" in case:
-                assert _expand(case["input"], home) == case["expect"], case["input"]
-            else:
-                with pytest.raises(PolicyError) as exc:
-                    _expand(case["input"], home)
-                assert case["error"] in str(exc.value), case["input"]
-
-    def test_path_fields_expand(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/alice")
-        p = policy_from_dict(
-            {
-                "filesystem": {
-                    "read": ["${HOME}/src"],
-                    "mount": ["/work:${HOME}/host"],
-                },
-                "program": {"cwd": "${HOME}/src"},
-            }
-        )
-        assert p.fs_readable == ["/home/alice/src"]
-        assert p.cwd == "/home/alice/src"
-        assert p.fs_mount == {"/work": "/home/alice/host"}
-
-    def test_error_names_the_field(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/alice")
-        with pytest.raises(PolicyError, match=r"\[filesystem\]\.read"):
-            policy_from_dict({"filesystem": {"read": ["${NOPE}"]}})
-
-    def test_no_variables_never_resolves_home(self, monkeypatch):
-        monkeypatch.delenv("HOME", raising=False)
-        p = policy_from_dict({"filesystem": {"read": ["/usr/lib"]}})
-        assert p.fs_readable == ["/usr/lib"]
-
-    def test_absolute_env_home_wins(self, monkeypatch):
-        from sandlock._profile import _resolve_home
-
-        monkeypatch.setenv("HOME", "/env/home")
-        assert _resolve_home() == "/env/home"
-
-    @pytest.mark.parametrize("bad", ["/", "//"])
-    def test_root_env_home_falls_back_to_passwd(self, monkeypatch, bad):
-        # `/` is absolute but is nobody's home, and expanding it would turn
-        # write = ["${HOME}"] into a grant over the whole filesystem.
-        import pwd
-
-        from sandlock._profile import _resolve_home
-
-        monkeypatch.setenv("HOME", bad)
-        expected = pwd.getpwuid(os.getuid()).pw_dir
-        if not expected.startswith("/") or expected.rstrip("/") == "":
-            pytest.skip("this uid has no usable passwd home")
-        assert _resolve_home() == expected
-
-    def test_trailing_slash_home_is_kept(self, monkeypatch):
-        # Only the all-slashes case is meaningless; `/root/` is a real home.
-        from sandlock._profile import _resolve_home
-
-        monkeypatch.setenv("HOME", "/root/")
-        assert _resolve_home() == "/root/"
-
-    def test_home_under_chroot_is_an_error(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/env/home")
-        with pytest.raises(PolicyError, match="chroot"):
-            policy_from_dict(
-                {"filesystem": {"chroot": "/jail", "read": ["${HOME}/src"]}}
-            )
-
-    def test_chroot_without_variables_still_loads(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/env/home")
-        p = policy_from_dict(
-            {"filesystem": {"chroot": "/jail", "read": ["/usr/lib"]}}
-        )
-        assert p.chroot == "/jail"
-
-    @pytest.mark.parametrize("bad", ["", "relative/home"])
-    def test_non_absolute_env_home_falls_back_to_passwd(self, monkeypatch, bad):
-        import pwd
-
-        from sandlock._profile import _resolve_home
-
-        monkeypatch.setenv("HOME", bad)
-        expected = pwd.getpwuid(os.getuid()).pw_dir
-        if not expected.startswith("/"):
-            pytest.skip("this uid has no absolute passwd home")
-        assert _resolve_home() == expected

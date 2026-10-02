@@ -2667,6 +2667,65 @@ pub unsafe extern "C" fn sandlock_image_pull(
     }
 }
 
+/// Parse a TOML profile with the core parser, the one the CLI uses, and
+/// return it as JSON keyed by `Sandbox` field names: `${HOME}` expanded,
+/// mount specs split into `fs_mount` and `fs_mount_ro` objects, and every
+/// value already validated. Returns NULL on error with `*err_msg` set; free
+/// either string with `sandlock_string_free`.
+///
+/// # Safety
+/// `toml` must be a valid C string; `err_msg` a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sandlock_profile_resolve(
+    toml: *const c_char,
+    err_msg: *mut *mut c_char,
+) -> *mut c_char {
+    if !err_msg.is_null() {
+        *err_msg = ptr::null_mut();
+    }
+    let fail = |msg: String| {
+        if !err_msg.is_null() {
+            *err_msg = CString::new(msg).map(CString::into_raw).unwrap_or(ptr::null_mut());
+        }
+        ptr::null_mut()
+    };
+    let Some(toml) = (!toml.is_null()).then(|| CStr::from_ptr(toml).to_str().ok()).flatten() else {
+        return fail("profile must be a UTF-8 string".into());
+    };
+    let resolved = match sandlock_core::profile::resolve_profile(toml) {
+        Ok(r) => r,
+        Err(e) => return fail(e.to_string()),
+    };
+    match serde_json::to_string(&resolved) {
+        Ok(json) => CString::new(json).map(CString::into_raw).unwrap_or(ptr::null_mut()),
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+/// The directory named profiles are loaded from, as the CLI resolves it.
+/// Returns NULL when no usable home directory exists, with `*err_msg` set;
+/// free either string with `sandlock_string_free`.
+///
+/// # Safety
+/// `err_msg` must be a valid pointer or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn sandlock_profile_dir(err_msg: *mut *mut c_char) -> *mut c_char {
+    if !err_msg.is_null() {
+        *err_msg = ptr::null_mut();
+    }
+    match sandlock_core::profile::profile_dir() {
+        Ok(dir) => CString::new(dir.into_os_string().into_encoded_bytes())
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut()),
+        Err(e) => {
+            if !err_msg.is_null() {
+                *err_msg = CString::new(e.to_string()).map(CString::into_raw).unwrap_or(ptr::null_mut());
+            }
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Load a checkpoint from a directory.
 /// Returns NULL on error.
 ///

@@ -104,6 +104,7 @@ with Sandbox(fs_readable=["/usr", "/lib"]) as sb:
 | `workdir` | `str \| None` | `None` | Working directory; enables COW protection |
 | `chroot` | `str \| None` | `None` | Path to chroot into before confinement |
 | `fs_mount` | `dict[str, str]` | `{}` | Map virtual paths to host directories inside chroot |
+| `fs_mount_ro` | `dict[str, str]` | `{}` | Like `fs_mount`, but writes under the virtual path are denied |
 | `image` | `Image \| None` | `None` | Run inside a container image from `pull_image()` |
 | `cwd` | `str \| None` | `None` | Child working directory |
 
@@ -767,8 +768,9 @@ Default store: `~/.sandlock/checkpoints/`.
 
 ### Profiles
 
-Load sandbox configuration from TOML files:
-Profiles contain sandbox config only; pass the sandbox name at construction: `Sandbox(..., name=...)`.
+Load sandbox configuration from TOML files in `~/.config/sandlock/profiles/`.
+They are parsed by the same core parser as the CLI, so a profile means the
+same thing to both. Profiles contain sandbox config only; pass the sandbox name at construction: `Sandbox(..., name=...)`.
 
 ```python
 from sandlock import load_profile, list_profiles

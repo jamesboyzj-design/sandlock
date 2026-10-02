@@ -90,7 +90,7 @@ policy on each call.
 
 | Group | Fields |
 |---|---|
-| Filesystem | `FSReadable`, `FSWritable`, `FSDenied`, `Workdir`, `Cwd`, `Chroot`, `FSMount`, `Image` |
+| Filesystem | `FSReadable`, `FSWritable`, `FSDenied`, `Workdir`, `Cwd`, `Chroot`, `FSMount`, `FSMountRO`, `Image` |
 | Network | `NetAllow`, `NetDeny`, `NetAllowBind`, `NetDenyBind`, `PortRemap` |
 | HTTP ACL | `HTTPAllow`, `HTTPDeny`, `HTTPPorts`, `HTTPCAFile`, `HTTPKeyFile` |
 | Resources | `MaxMemory`, `MaxDisk`, `MaxProcesses`, `MaxCPU`, `MaxOpenFiles`, `CPUCores`, `NumCPUs`, `GPUDevices` |
@@ -196,6 +196,20 @@ sb := &sandlock.Sandbox{Image: img, MaxMemory: "512M"}
 res, _ := sb.Run(ctx, "python3", "-c", "print('hello')")
 // Or the image's own command: sb.Run(ctx, img.Config.DefaultCmd()...)
 ```
+
+### Profiles
+
+TOML profiles are parsed by sandlock's own parser, the one the CLI uses, so a
+profile means the same thing to both. Named profiles live in
+`~/.config/sandlock/profiles` (`ProfileDir()`).
+
+```go
+sb, err := sandlock.LoadProfile("build")        // or LoadProfileFile(path), ParseProfile(text)
+names, err := sandlock.ListProfiles()
+```
+
+A profile field the Go `Sandbox` cannot express (such as `[config].http_inject_ca`)
+is an error rather than silently dropped.
 
 ### Dynamic policy callbacks
 
