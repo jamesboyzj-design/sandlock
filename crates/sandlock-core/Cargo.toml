@@ -49,3 +49,4 @@ cli = ["dep:clap"]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tempfile = "3"
 rustls-pemfile = "2"
+x509-parser = "0.16"
