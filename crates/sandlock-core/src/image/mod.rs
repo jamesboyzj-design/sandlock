@@ -34,7 +34,7 @@ mod oci;
 mod registry;
 
 /// An unpacked image: its root filesystem and how it expects to be run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Image {
     pub rootfs: PathBuf,
     pub config: ImageConfig,
@@ -42,6 +42,7 @@ pub struct Image {
 
 /// The run settings an image carries in its config blob.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ImageConfig {
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,

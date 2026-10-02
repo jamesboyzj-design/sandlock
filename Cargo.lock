@@ -1468,8 +1468,10 @@ name = "sandlock-ffi"
 version = "0.8.9"
 dependencies = [
  "libc",
+ "ring",
  "sandlock-core",
  "serde_json",
+ "tar",
  "tempfile",
  "tokio",
 ]

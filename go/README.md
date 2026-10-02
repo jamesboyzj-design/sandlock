@@ -90,7 +90,7 @@ policy on each call.
 
 | Group | Fields |
 |---|---|
-| Filesystem | `FSReadable`, `FSWritable`, `FSDenied`, `Workdir`, `Cwd`, `Chroot`, `FSMount` |
+| Filesystem | `FSReadable`, `FSWritable`, `FSDenied`, `Workdir`, `Cwd`, `Chroot`, `FSMount`, `Image` |
 | Network | `NetAllow`, `NetDeny`, `NetAllowBind`, `NetDenyBind`, `PortRemap` |
 | HTTP ACL | `HTTPAllow`, `HTTPDeny`, `HTTPPorts`, `HTTPCAFile`, `HTTPKeyFile` |
 | Resources | `MaxMemory`, `MaxDisk`, `MaxProcesses`, `MaxCPU`, `MaxOpenFiles`, `CPUCores`, `NumCPUs`, `GPUDevices` |
@@ -151,6 +151,50 @@ p.Stdin.Write([]byte("hi\n"))
 p.Stdin.Close()                 // EOF so cat exits
 out, _ := io.ReadAll(p.Stdout)  // "hi\n"
 res, _ := p.Wait()
+```
+
+### Container images
+
+```go
+func PullImage(reference, cacheDir string) (*Image, error)
+```
+
+`PullImage` fetches and unpacks a container image without a Docker daemon or
+root, and returns it as plain data. Setting `Sandbox.Image` runs inside it:
+the image's rootfs becomes the chroot, read access to `/` inside it is
+granted, and its `Env` and `WorkingDir` fill only what `Env` and `Cwd` leave
+unset.
+
+Like a container's writable layer, every write lands in a copy-on-write
+branch that is discarded when the run ends, so the cached image never
+changes. To keep output, mount a host directory with `FSMount` and grant it
+in `FSWritable`; setting `Workdir`, or an `OnExit`/`OnError` other than
+`BranchActionAbort`, is rejected. The cache belongs to the invoking user, so
+it is only as protected as that user's other files.
+
+| Reference | Source |
+|---|---|
+| `docker://python:3.12`, `docker://ghcr.io/org/img@sha256:...` | registry (Docker Hub by default) |
+| `oci:<dir>[:tag]` | OCI image layout directory |
+| `oci-archive:<file>[:tag]` | tar of an OCI image layout |
+| `docker-daemon:<ref>`, `docker-daemon:sha256:<id>` | local Docker daemon (Docker 25+) |
+
+References use skopeo's transport syntax (containers-transports(5)): the
+transport prefix is required, and a tag together with a digest is rejected.
+Registry credentials come from `docker login`'s `~/.docker/config.json` (or
+`$DOCKER_CONFIG`); credential helpers are not run. Every blob is verified
+against its digest, and each image is unpacked once into `cacheDir`, or
+`$XDG_CACHE_HOME/sandlock/images` when `cacheDir` is empty. A cached image
+named by digest starts without network access.
+
+```go
+img, err := sandlock.PullImage("docker://python:3.12-slim", "")
+if err != nil {
+	log.Fatal(err)
+}
+sb := &sandlock.Sandbox{Image: img, MaxMemory: "512M"}
+res, _ := sb.Run(ctx, "python3", "-c", "print('hello')")
+// Or the image's own command: sb.Run(ctx, img.Config.DefaultCmd()...)
 ```
 
 ### Dynamic policy callbacks

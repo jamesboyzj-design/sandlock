@@ -152,6 +152,16 @@ func (s *Sandbox) validateStrings() error {
 			return ErrInvalidString
 		}
 	}
+	if img := s.Image; img != nil {
+		c := img.Config
+		for _, g := range [][]string{{img.Rootfs, c.WorkingDir}, c.Entrypoint, c.Cmd, c.Env} {
+			for _, v := range g {
+				if hasNUL(v) {
+					return ErrInvalidString
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -200,6 +210,14 @@ func (s *Sandbox) buildPolicy() (*C.sandlock_sandbox_t, error) {
 		str(func(b *C.sandlock_builder_t, c *C.char) *C.sandlock_builder_t {
 			return C.sandlock_sandbox_builder_chroot(b, c)
 		}, s.Chroot)
+	}
+	if s.Image != nil {
+		// Marshalling plain strings and slices cannot fail. A builder the FFI
+		// rejects comes back NULL, and the final build reports the failure.
+		data, _ := json.Marshal(s.Image)
+		str(func(b *C.sandlock_builder_t, c *C.char) *C.sandlock_builder_t {
+			return C.sandlock_sandbox_builder_image(b, c)
+		}, string(data))
 	}
 	for vp, hp := range s.FSMount {
 		cv, ch := C.CString(vp), C.CString(hp)
@@ -730,6 +748,40 @@ func (s *Sandbox) RunInteractive(ctx context.Context, cmd ...string) (int, error
 
 	code := int(C.sandlock_run_interactive(policyPtr, name, ap, ac))
 	return code, nil
+}
+
+// PullImage fetches and unpacks a container image, reusing the cache when
+// the image is already there. reference uses skopeo's transport syntax:
+// "docker://python:3.12" (registry), "docker-daemon:myapp:dev" (local Docker
+// daemon), "oci:<dir>[:tag]" or "oci-archive:<file>[:tag]". An empty
+// cacheDir selects the default cache.
+func PullImage(reference, cacheDir string) (*Image, error) {
+	if hasNUL(reference) || hasNUL(cacheDir) {
+		return nil, ErrInvalidString
+	}
+	cRef := C.CString(reference)
+	defer C.free(unsafe.Pointer(cRef))
+	var cCache *C.char
+	if cacheDir != "" {
+		cCache = C.CString(cacheDir)
+		defer C.free(unsafe.Pointer(cCache))
+	}
+	var errMsg *C.char
+	out := C.sandlock_image_pull(cRef, cCache, &errMsg)
+	if out == nil {
+		msg := "failed to pull image"
+		if errMsg != nil {
+			msg = C.GoString(errMsg)
+			C.sandlock_string_free(errMsg)
+		}
+		return nil, fmt.Errorf("sandlock: %s", msg)
+	}
+	defer C.sandlock_string_free(out)
+	var img Image
+	if err := json.Unmarshal([]byte(C.GoString(out)), &img); err != nil {
+		return nil, fmt.Errorf("sandlock: decoding pulled image: %w", err)
+	}
+	return &img, nil
 }
 
 // Confine applies the Sandbox's Landlock filesystem rules to the current

@@ -10,12 +10,13 @@ from ._sdk import (
     Stage, Pipeline, Result, ExitReason, SyscallEvent, PolicyContext, Checkpoint, SkippedFd,
     NamedStage, Gather, GatherPipeline,
     Protection,
-    landlock_abi_version, min_landlock_abi, confine,
+    landlock_abi_version, min_landlock_abi, confine, pull_image,
 )
 from .inputs import inputs
 from .handler import Handler, NotifAction, HandlerCtx, ExceptionPolicy
 from .sandbox import (
     Sandbox, BranchAction, parse_ports, Change, Entry, renames, StdioMode, Process,
+    Image, ImageConfig,
 )
 from ._profile import load_profile, list_profiles
 from .exceptions import (
@@ -37,6 +38,9 @@ __all__ = [
     "__version__",
     # Core API
     "Sandbox",
+    "Image",
+    "ImageConfig",
+    "pull_image",
     "Stage",
     "Pipeline",
     "Result",
