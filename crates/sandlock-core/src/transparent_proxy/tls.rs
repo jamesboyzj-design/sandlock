@@ -29,7 +29,11 @@ impl CertSigner {
         let ca_cert = ca_params.self_signed(&ca_key).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("CA rebuild: {e}"))
         })?;
-        Ok(Self { ca_cert, ca_key, cache: Mutex::new(HashMap::new()) })
+        Ok(Self {
+            ca_cert,
+            ca_key,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Mint (or cache-hit) a ServerConfig presenting a leaf cert for `sni`.
@@ -37,24 +41,7 @@ impl CertSigner {
         if let Some(cfg) = self.cache.lock().unwrap().get(sni) {
             return Ok(Arc::clone(cfg));
         }
-        let leaf_key = KeyPair::generate().map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("leaf keygen: {e}"))
-        })?;
-        // new(vec![sni]) sets subject_alt_names to a single DnsName(sni) entry.
-        let mut params = CertificateParams::new(vec![sni.to_string()]).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("leaf params: {e}"))
-        })?;
-        // Give the leaf a subject CN distinct from the CA's subject, so the leaf
-        // is not mistaken for self-signed (subject == issuer) by clients.
-        params.distinguished_name.push(DnType::CommonName, sni);
-        // RFC 5280 4.2.1.1: non-self-signed certificates identify their issuer's
-        // key. OpenSSL strict verification (Python 3.13+) requires this.
-        params.use_authority_key_identifier_extension = true;
-        // signed_by(public_key, issuer_cert, issuer_key): leaf public key is the
-        // leaf KeyPair (impl PublicKeyData), signed by the CA cert + CA key.
-        let leaf = params.signed_by(&leaf_key, &self.ca_cert, &self.ca_key).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("leaf sign: {e}"))
-        })?;
+        let (leaf, leaf_key) = self.mint_leaf(sni)?;
 
         // Present only the leaf; the CA is the trust anchor in the client's store.
         let chain = vec![leaf.der().clone()];
@@ -66,24 +53,109 @@ impl CertSigner {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let mut cfg = ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("server cfg: {e}")))?
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("server cfg: {e}"))
+            })?
             .with_no_client_auth()
             .with_single_cert(chain, key_der)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("server cfg: {e}")))?;
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("server cfg: {e}"))
+            })?;
         cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
         let cfg = Arc::new(cfg);
-        self.cache.lock().unwrap().insert(sni.to_string(), Arc::clone(&cfg));
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(sni.to_string(), Arc::clone(&cfg));
         Ok(cfg)
+    }
+
+    fn mint_leaf(&self, sni: &str) -> std::io::Result<(Certificate, KeyPair)> {
+        let leaf_key = KeyPair::generate().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("leaf keygen: {e}"))
+        })?;
+        // new(vec![sni]) sets subject_alt_names to a single DnsName(sni) entry.
+        let mut params = CertificateParams::new(vec![sni.to_string()]).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("leaf params: {e}"),
+            )
+        })?;
+        // Give the leaf a subject CN distinct from the CA's subject, so the leaf
+        // is not mistaken for self-signed (subject == issuer) by clients.
+        params.distinguished_name.push(DnType::CommonName, sni);
+        // RFC 5280 4.2.1.1: non-self-signed certificates identify their issuer's
+        // key. OpenSSL strict verification (Python 3.13+) requires this.
+        params.use_authority_key_identifier_extension = true;
+        // signed_by(public_key, issuer_cert, issuer_key): leaf public key is the
+        // leaf KeyPair (impl PublicKeyData), signed by the CA cert + CA key.
+        let leaf = params
+            .signed_by(&leaf_key, &self.ca_cert, &self.ca_key)
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("leaf sign: {e}"))
+            })?;
+
+        Ok((leaf, leaf_key))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x509_parser::extensions::ParsedExtension;
+    use x509_parser::prelude::parse_x509_certificate;
 
     fn test_ca() -> (String, String) {
-        let m = crate::transparent_proxy::resolve_ca(None, None, true).unwrap().unwrap();
+        let m = crate::transparent_proxy::resolve_ca(None, None, true)
+            .unwrap()
+            .unwrap();
         (m.cert_pem, m.key_pem)
+    }
+
+    #[test]
+    fn generated_ca_has_key_cert_sign() {
+        let (cert, _) = test_ca();
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert.as_bytes()).expect("CA PEM");
+        let (_, ca) = parse_x509_certificate(&pem.contents).expect("CA DER");
+        let usage = ca
+            .key_usage()
+            .expect("valid CA key usage")
+            .expect("CA KeyUsage required");
+        assert!(
+            usage.value.key_cert_sign(),
+            "CA KeyUsage must include keyCertSign"
+        );
+    }
+
+    #[test]
+    fn minted_leaf_aki_matches_generated_ca_ski() {
+        let (cert, key) = test_ca();
+        let signer = CertSigner::new(&cert, &key).expect("signer");
+        let (leaf, _) = signer.mint_leaf("localhost").expect("minted leaf");
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert.as_bytes()).expect("CA PEM");
+        let (_, ca) = parse_x509_certificate(&pem.contents).expect("CA DER");
+        let (_, leaf) = parse_x509_certificate(leaf.der()).expect("leaf DER");
+        let ski = ca
+            .extensions()
+            .iter()
+            .find_map(|ext| match ext.parsed_extension() {
+                ParsedExtension::SubjectKeyIdentifier(ski) => Some(ski.0),
+                _ => None,
+            })
+            .expect("CA SubjectKeyIdentifier required");
+        let aki = leaf
+            .extensions()
+            .iter()
+            .find_map(|ext| match ext.parsed_extension() {
+                ParsedExtension::AuthorityKeyIdentifier(aki) => Some(aki),
+                _ => None,
+            })
+            .expect("leaf AuthorityKeyIdentifier required");
+        let key_id = aki
+            .key_identifier
+            .as_ref()
+            .expect("leaf AKI keyIdentifier required");
+        assert_eq!(key_id.0, ski, "leaf AKI must identify the original CA SKI");
     }
 
     #[test]

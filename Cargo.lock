@@ -1414,6 +1414,7 @@ dependencies = [
  "toml",
  "uuid",
  "walkdir",
+ "x509-parser",
 ]
 
 [[package]]
