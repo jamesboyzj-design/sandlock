@@ -2540,3 +2540,66 @@ async fn check_readonly_open_effects(cow: bool) {
     fs::remove_dir_all(mounted).unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[tokio::test]
+async fn test_chroot_access_modes_match_grants() {
+    check_access_modes(false).await;
+}
+
+#[tokio::test]
+async fn test_chroot_cow_access_modes_match_grants() {
+    check_access_modes(true).await;
+}
+
+async fn check_access_modes(cow: bool) {
+    let rootfs = build_test_rootfs(&format!("access-modes-{cow}"));
+    let mounted = temp_dir(&format!("access-modes-mount-{cow}"));
+    for directory in ["ro", "rw", "mnt"] {
+        fs::create_dir_all(rootfs.join(directory)).unwrap();
+    }
+    for dir in [rootfs.join("ro"), rootfs.join("rw"), mounted.clone()] {
+        fs::write(dir.join("data"), b"KEEP").unwrap();
+        fs::set_permissions(dir.join("data"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(dir.join("exec"), b"executable").unwrap();
+        fs::set_permissions(dir.join("exec"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(dir.join("lower-ro"), b"KEEP").unwrap();
+        fs::set_permissions(dir.join("lower-ro"), fs::Permissions::from_mode(0o400)).unwrap();
+        fs::write(dir.join("unreadable"), b"KEEP").unwrap();
+        fs::set_permissions(dir.join("unreadable"), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let mut builder = minimal_exec_policy(&rootfs)
+        .fs_read("/ro").fs_write("/rw").fs_mount_ro("/mnt", &mounted);
+    if cow { builder = builder.workdir(&rootfs).on_exit(BranchAction::Abort); }
+    let policy = builder.build().unwrap();
+    let mut failures = Vec::new();
+    for spelling in ["access", "faccessat", "faccessat2"] {
+        for (directory, writable) in [("/ro", false), ("/rw", true), ("/mnt", false)] {
+            for (name, mode, errno) in [
+                ("data", libc::F_OK, 0),
+                ("data", libc::R_OK, 0),
+                ("data", libc::W_OK, if writable { 0 } else { libc::EACCES }),
+                ("data", libc::R_OK | libc::W_OK, if writable { 0 } else { libc::EACCES }),
+                ("data", libc::X_OK, libc::EACCES),
+                ("exec", libc::R_OK | libc::X_OK, 0),
+                ("lower-ro", libc::W_OK, if cow && writable { 0 } else { libc::EACCES }),
+                ("unreadable", libc::R_OK | libc::W_OK, libc::EACCES),
+                ("data", 8, libc::EINVAL),
+                ("absent", libc::F_OK, libc::ENOENT),
+            ] {
+                let path = format!("{directory}/{name}");
+                let text = mode.to_string();
+                let result = policy.clone().run(&[
+                    "rootfs-helper", "access-mode", spelling, &path, &text,
+                ]).await.expect("access test must run without a skip");
+                assert!(result.success(), "helper: {:?}", result.stderr_str());
+                let expected = if errno == 0 { "OK".into() } else { format!("ERR:{errno}") };
+                if result.stdout_str().unwrap().trim() != expected {
+                    failures.push(format!("{spelling}({path}, {mode}): expected {expected}, got {:?}", result.stdout_str()));
+                }
+            }
+        }
+    }
+    cleanup_rootfs(&rootfs);
+    fs::remove_dir_all(mounted).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

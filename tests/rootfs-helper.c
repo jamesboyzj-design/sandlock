@@ -278,6 +278,28 @@ static int cmd_access(int argc, char **argv) {
     return 0;
 }
 
+/* Exercise the raw access ABIs: libc may replace access with faccessat2. */
+static int cmd_access_mode(int argc, char **argv) {
+    if (argc != 3) return 2;
+    int mode = (int)strtol(argv[2], NULL, 0);
+    long result;
+    if (strcmp(argv[0], "access") == 0) {
+#ifdef SYS_access
+        result = syscall(SYS_access, argv[1], mode);
+#else
+        result = syscall(SYS_faccessat, AT_FDCWD, argv[1], mode);
+#endif
+    } else if (strcmp(argv[0], "faccessat") == 0) {
+        result = syscall(SYS_faccessat, AT_FDCWD, argv[1], mode);
+    } else if (strcmp(argv[0], "faccessat2") == 0) {
+        /* faccessat2 is syscall 439 on the supported Linux architectures. */
+        result = syscall(439, AT_FDCWD, argv[1], mode, 0);
+    } else return 2;
+    if (result < 0) printf("ERR:%d\n", errno);
+    else puts("OK");
+    return 0;
+}
+
 /* ── getxattr (non-standard: print an extended attribute value) ── */
 static int cmd_getxattr(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "getxattr: usage: getxattr <file> <name>\n"); return 1; }
@@ -905,6 +927,7 @@ static int cmd_fexecve(int argc, char **argv) {
 /* ── dispatch ───────────────────────────────────────────────── */
 
 static int dispatch(const char *cmd, int argc, char **argv) {
+    if (strcmp(cmd, "access-mode") == 0)   return cmd_access_mode(argc, argv);
     if (strcmp(cmd, "open-flags") == 0)    return cmd_open_flags(argc, argv);
     if (strcmp(cmd, "chdir") == 0)          return cmd_chdir(argc, argv);
     if (strcmp(cmd, "fchdir") == 0)         return cmd_fchdir(argc, argv);

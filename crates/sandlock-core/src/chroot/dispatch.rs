@@ -1702,7 +1702,18 @@ pub(crate) async fn handle_chroot_stat(
     ctx: &ChrootCtx<'_>,
 ) -> NotifAction {
     let nr = notif.data.nr as i64;
-    let flags = notif.data.args[3];
+    let is_access = nr == libc::SYS_faccessat || nr == crate::arch::SYS_FACCESSAT2;
+    // The original faccessat syscall has three arguments; its fourth
+    // register is not a flags argument and must never affect resolution.
+    let flags = if nr == libc::SYS_faccessat { 0 } else { notif.data.args[3] };
+    let mode = notif.data.args[2] as i32;
+    if is_access {
+        if mode & !(libc::R_OK | libc::W_OK | libc::X_OK) != 0
+            || flags & !((libc::AT_EACCESS | libc::AT_SYMLINK_NOFOLLOW | libc::AT_EMPTY_PATH) as u64) != 0
+        {
+            return NotifAction::Errno(libc::EINVAL);
+        }
+    }
 
     // AT_EMPTY_PATH: fstat(fd, &statbuf) — the fd already points to the
     // correct file (injected by the chroot handler or inherited). Let the
@@ -1713,6 +1724,10 @@ pub(crate) async fn handle_chroot_stat(
 
     let resolved = if (flags & libc::AT_SYMLINK_NOFOLLOW as u64) != 0 {
         read_and_resolve_nofollow(notif, notif_fd, ctx, 0, 1)
+    } else if is_access {
+        // Keep a missing basename so access can report ENOENT, rather
+        // than turning every failed existing-target lookup into EACCES.
+        read_and_resolve(notif, notif_fd, ctx, 0, 1)
     } else {
         read_and_resolve_existing(notif, notif_fd, ctx, 0, 1)
     };
@@ -1721,17 +1736,35 @@ pub(crate) async fn handle_chroot_stat(
         Err(a) => return a,
     };
     if !ctx.can_read(&vp) { return NotifAction::Errno(libc::EACCES); }
+    if is_access && mode & libc::W_OK != 0 && !ctx.can_write(&vp) {
+        return NotifAction::Errno(libc::EACCES);
+    }
 
     let real_path = match cow_resolve(cow_state, &host_path).await {
         Ok(p) => p,
         Err(a) => return a,
     };
 
-    if nr == libc::SYS_faccessat || nr == crate::arch::SYS_FACCESSAT2 {
-        return if real_path.exists() || real_path.is_symlink() {
+    if is_access {
+        // COW writes target the upper layer, so a read-only lower inode
+        // must not veto an authorized W_OK. Read/execute permissions and
+        // existence must still be checked instead of reporting success.
+        let cs = cow_state.lock().await;
+        let copied_on_write = cs.branch.as_ref().is_some_and(|cow| {
+            host_path.to_str().is_some_and(|path| cow.matches(path))
+        });
+        let kernel_mode = if copied_on_write { mode & !libc::W_OK } else { mode };
+        let path = match path_cstr(&real_path, libc::EINVAL) {
+            Ok(p) => p,
+            Err(a) => return a,
+        };
+        let ret = unsafe {
+            libc::faccessat(libc::AT_FDCWD, path.as_ptr(), kernel_mode, flags as i32)
+        };
+        return if ret == 0 {
             NotifAction::ReturnValue(0)
         } else {
-            NotifAction::Errno(libc::ENOENT)
+            NotifAction::Errno(last_errno(libc::EACCES))
         };
     }
 
@@ -2469,7 +2502,7 @@ pub(crate) async fn handle_chroot_legacy_access(
     let mut synth = notif_with_args(notif, [
         libc::AT_FDCWD as u64,
         notif.data.args[0], // path
-        0,                  // statbuf (unused for faccessat path)
+        notif.data.args[1], // access mode (not a stat buffer)
         0,                  // flags
         0, 0,
     ]);
