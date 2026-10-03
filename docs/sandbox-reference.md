@@ -36,7 +36,7 @@ sandbox = Sandbox(
 
     # [filesystem]
     fs_readable=(), fs_writable=(), fs_denied=(),
-    chroot=None, fs_mount={},
+    chroot=None, fs_mount={}, fs_mount_ro={},
     on_exit=BranchAction.COMMIT, on_error=BranchAction.ABORT,
 
     # [network]
@@ -54,7 +54,7 @@ sandbox = Sandbox(
     gpu_devices=None, cpu_cores=None, num_cpus=None,
 
     # Runtime kwargs (not serialized as policy)
-    name=None, policy_fn=None, init_fn=None, work_fn=None,
+    name=None, image=None, policy_fn=None, init_fn=None, work_fn=None,
 
     # Advanced (internal; usually configured via the fields above)
     notif_policy=None,
@@ -319,7 +319,8 @@ filesystem isolation.
 | `fs_writable`  | `write`     | `Sequence[str]`     | `()`                    | Paths the sandbox may read and write.                                                                                        |
 | `fs_denied`    | `deny`      | `Sequence[str]`     | `()`                    | Paths explicitly denied (neither read nor write), even if implied by a broader rule.                                         |
 | `chroot`       | `chroot`    | `str \| None`       | `None`                  | Path to `chroot` into before applying other confinement.                                                                     |
-| `fs_mount`     | `mount`     | `Mapping[str, str]` | `{}`                    | Map virtual paths inside the chroot to host directories. Python form: `{"/work": "/host/sandbox/work"}`. TOML form: list of `"VIRTUAL:HOST"` strings. A trailing `:ro` (or the default `:rw`) selects a read-only mount: the CLI honours it in `--fs-mount` and in profiles, and `sandlock inspect --toml` writes `:ro` back out. The Python SDK rejects such entries with `PolicyError`, since its mapping cannot express a read-only mount; load the profile with the CLI (`sandlock run --profile-file <path>`), or use the C ABI's `sandlock_sandbox_builder_fs_mount_ro`. |
+| `fs_mount`     | `mount`     | `Mapping[str, str]` | `{}`                    | Map virtual paths inside the chroot to host directories. Python form: `{"/work": "/host/sandbox/work"}`. TOML form: list of `"VIRTUAL:HOST"` strings. A trailing `:ro` (or the default `:rw`) selects a read-only mount: the CLI honours it in `--fs-mount` and in profiles, and `sandlock inspect --toml` writes `:ro` back out. The Python SDK loads `:ro` entries into `fs_mount_ro`. |
+| `fs_mount_ro`  | `mount`     | `Mapping[str, str]` | `{}`                    | Same as `fs_mount`, but writes under the virtual path fail with `EACCES`. Filled from `mount` entries ending in `:ro`. A virtual path may not appear in both mappings. |
 | `on_exit`      | `on_exit`   | `BranchAction`      | `BranchAction.COMMIT`   | Branch action on normal sandbox exit.                                                                                        |
 | `on_error`     | `on_error`  | `BranchAction`      | `BranchAction.ABORT`    | Branch action on sandbox error or exception.                                                                                 |
 
@@ -412,6 +413,7 @@ and have no TOML counterpart.
 | Field       | Type              | Default | Description                                                                                                |
 | ----------- | ----------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
 | `name`      | `str \| None`     | `None`  | Sandbox name and virtual hostname inside the sandbox. Auto-generated as `sandbox-{pid}` when omitted. Maximum 64 bytes; must not contain NUL. |
+| `image`     | `Image \| None`   | `None`  | Container image from `sandlock.pull_image()`. Its rootfs becomes the chroot; its env and working directory fill only what `env` and `cwd` leave unset. Writes land in a copy-on-write branch that is always discarded, so the cached image never changes: `workdir` and a non-abort `on_error` are rejected, and output meant to persist goes through `fs_mount`. Runtime rather than policy because it names a local cache path. |
 | `policy_fn` | `Callable \| None`| `None`  | Per-event dynamic policy callback. See [`policy-fn.md`](policy-fn.md).                      |
 | `init_fn`   | `Callable \| None`| `None`  | Callback invoked once in the template process prior to COW fork.                                           |
 | `work_fn`   | `Callable \| None`| `None`  | Callback invoked in each COW clone; receives `clone_id` as its argument.                                   |

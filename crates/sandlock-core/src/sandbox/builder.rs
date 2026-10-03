@@ -172,6 +172,9 @@ pub struct SandboxBuilder {
     #[cfg_attr(feature = "cli", arg(long = "chroot"))]
     pub chroot: Option<PathBuf>,
 
+    #[cfg_attr(feature = "cli", clap(skip))]
+    pub(crate) image_rootfs: Option<PathBuf>,
+
     #[cfg_attr(feature = "cli", arg(long = "clean-env"))]
     pub clean_env: bool,
 
@@ -287,6 +290,7 @@ impl Default for SandboxBuilder {
             fs_mount: Vec::new(),
             fs_mount_ro: Vec::new(),
             chroot: None,
+            image_rootfs: None,
             clean_env: false,
             env: std::collections::HashMap::new(),
             gpu_devices: None,
@@ -350,6 +354,7 @@ impl Clone for SandboxBuilder {
             fs_mount: self.fs_mount.clone(),
             fs_mount_ro: self.fs_mount_ro.clone(),
             chroot: self.chroot.clone(),
+            image_rootfs: self.image_rootfs.clone(),
             clean_env: self.clean_env,
             env: self.env.clone(),
             gpu_devices: self.gpu_devices.clone(),
@@ -731,6 +736,26 @@ impl SandboxBuilder {
         self
     }
 
+    /// Run inside `image`. Its Env and WorkingDir only fill what the caller
+    /// has not set, so explicit settings win whichever order they come in.
+    /// Writes land in a copy-on-write branch that is always discarded; see
+    /// `build_unchecked`.
+    pub fn image(mut self, image: &crate::image::Image) -> Self {
+        self.chroot = Some(image.rootfs.clone());
+        self.image_rootfs = Some(image.rootfs.clone());
+        self.fs_readable.push("/".into());
+        self.workdir.get_or_insert_with(|| image.rootfs.clone());
+        for var in &image.config.env {
+            if let Some((key, value)) = var.split_once('=') {
+                self.env.entry(key.to_string()).or_insert_with(|| value.to_string());
+            }
+        }
+        if let Some(dir) = &image.config.working_dir {
+            self.cwd.get_or_insert_with(|| dir.into());
+        }
+        self
+    }
+
 
     pub fn gpu_devices(mut self, devices: Vec<u32>) -> Self {
         self.gpu_devices = Some(devices);
@@ -843,6 +868,43 @@ impl SandboxBuilder {
                  you wanted REFER enforced only where the kernel supports it)."
                     .into(),
             ));
+        }
+
+        // An image rootfs is a cache entry every sandbox of that image shares,
+        // so, like the read-only layers under a Docker container, it may only
+        // be the lower side of a copy-on-write branch that is thrown away.
+        if let Some(rootfs) = &self.image_rootfs {
+            if self.workdir.as_ref() != Some(rootfs) {
+                return Err(SandboxError::Invalid(
+                    "an image's rootfs is always the copy-on-write root; mount a \
+                     host directory with fs_mount to keep output instead of \
+                     setting workdir"
+                        .into(),
+                ));
+            }
+            for (name, action) in [("on_exit", &self.on_exit), ("on_error", &self.on_error)] {
+                if action.as_ref().is_some_and(|a| *a != BranchAction::Abort) {
+                    return Err(SandboxError::Invalid(format!(
+                        "{name} must be abort with an image: its writes are always \
+                         discarded so the shared image cache never changes; mount a \
+                         host directory with fs_mount to keep output"
+                    )));
+                }
+            }
+        }
+        let discard = self.image_rootfs.is_some();
+
+        // Lookup picks the first of two equal-length prefixes, so a repeated
+        // virtual path would silently drop one mapping and, with it, possibly
+        // the read-only marking the operator asked for.
+        let mut seen = std::collections::HashSet::new();
+        for (virt, _) in &self.fs_mount {
+            if !seen.insert(virt) {
+                return Err(SandboxError::Invalid(format!(
+                    "virtual path {} is mounted more than once",
+                    virt.display()
+                )));
+            }
         }
 
         // Validate: max_cpu must be 1-100
@@ -1038,8 +1100,8 @@ impl SandboxBuilder {
             cwd: self.cwd,
             fs_storage: self.fs_storage,
             max_disk: self.max_disk,
-            on_exit: self.on_exit.unwrap_or_default(),
-            on_error: self.on_error.unwrap_or_default(),
+            on_exit: if discard { BranchAction::Abort } else { self.on_exit.unwrap_or_default() },
+            on_error: if discard { BranchAction::Abort } else { self.on_error.unwrap_or_default() },
             fs_mount: self.fs_mount,
             fs_mount_ro: self.fs_mount_ro,
             chroot: self.chroot,
@@ -1177,6 +1239,22 @@ mod tests {
             .max_open_files(64)
             .build()
             .expect("a non-zero cap must build");
+    }
+
+    #[test]
+    fn repeated_mount_virtual_path_is_rejected() {
+        let err = super::SandboxBuilder::default()
+            .fs_mount("/work", "/a")
+            .fs_mount_ro("/work", "/b")
+            .build()
+            .expect_err("a virtual path mounted twice must not build");
+        assert!(err.to_string().contains("/work"), "got: {err}");
+
+        super::SandboxBuilder::default()
+            .fs_mount("/work", "/a")
+            .fs_mount_ro("/work/sub", "/b")
+            .build()
+            .expect("nested virtual paths must still build");
     }
 
     #[test]

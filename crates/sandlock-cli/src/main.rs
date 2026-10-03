@@ -145,11 +145,9 @@ struct RunArgs {
     #[arg(short = 'e', long = "exec-shell", value_name = "CMD")]
     exec_shell: Option<String>,
 
-    /// Use a local Docker image as chroot rootfs, given by reference
-    /// (e.g. `python:3.12-slim`, a digest, or an image id). The image
-    /// must already be present in local Docker storage; sandlock never
-    /// pulls from a registry. Requires a running Docker daemon and an
-    /// accessible socket; the run fails early if neither is reachable.
+    /// Use a container image as chroot rootfs, named with skopeo's transport
+    /// syntax: `docker://<ref>` (registry), `docker-daemon:<ref>` (local
+    /// Docker daemon), `oci:<dir>[:tag]` or `oci-archive:<file>[:tag]`.
     #[arg(long, value_name = "IMAGE")]
     image: Option<String>,
 
@@ -433,18 +431,18 @@ async fn main() -> Result<()> {
                 ProfileAction::List => {
                     let profiles = profile::list_profiles()?;
                     if profiles.is_empty() {
-                        println!("No profiles found in {}", profile::profile_dir().display());
+                        println!("No profiles found in {}", profile::profile_dir()?.display());
                     } else {
                         for name in profiles { println!("  {}", name); }
                     }
                 }
                 ProfileAction::Show { name } => {
-                    let path = profile::profile_dir().join(format!("{}.toml", name));
+                    let path = profile::profile_dir()?.join(format!("{}.toml", name));
                     let content = std::fs::read_to_string(&path)?;
                     println!("{}", content);
                 }
                 ProfileAction::Delete { name } => {
-                    let path = profile::profile_dir().join(format!("{}.toml", name));
+                    let path = profile::profile_dir()?.join(format!("{}.toml", name));
                     std::fs::remove_file(&path)?;
                     println!("Deleted profile '{}'", name);
                 }
@@ -656,22 +654,11 @@ async fn run_command(args: RunArgs) -> Result<i32> {
     // (format: sandbox-<pid>-<counter>). Let core handle it when name is None.
     let sandbox_name = args.name.clone();
 
-    // Handle --image: extract rootfs, set chroot, get default cmd.
-    // Auto-set workdir to the rootfs path when the user hasn't passed one,
-    // so seccomp COW stages writes in an upper layer instead of mutating
-    // the shared image cache directly.
     let image_cmd: Option<Vec<String>>;
     if let Some(ref img) = args.image {
-        let rootfs = sandlock_core::image::extract(img, None).await?;
-        builder = builder.chroot(&rootfs).fs_read("/");
-        if pb.workdir.is_none() {
-            builder = builder.workdir(&rootfs);
-        }
-        if args.cmd.is_empty() {
-            image_cmd = Some(sandlock_core::image::inspect_cmd(img).await?);
-        } else {
-            image_cmd = None;
-        }
+        let image = sandlock_core::image::pull(img, None).await?;
+        builder = builder.image(&image);
+        image_cmd = args.cmd.is_empty().then(|| image.config.default_cmd());
     } else {
         image_cmd = None;
     }

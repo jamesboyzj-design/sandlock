@@ -2348,3 +2348,120 @@ async fn test_chroot_cow_symlink_stays_inside_the_rootfs() {
     let _ = fs::remove_dir_all(&host_dir);
     cleanup_rootfs(&rootfs);
 }
+
+/// fexecve names the image by fd, so the exec handler has no path to confine.
+/// Both an fd to a file inside the rootfs and a memfd copy, which has no path
+/// anywhere, must run instead of failing with EACCES.
+#[tokio::test]
+async fn test_chroot_fexecve_runs_an_image_held_by_fd() {
+    let rootfs = build_test_rootfs("fexecve");
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    for source in ["fd", "memfd"] {
+        let out = format!("fexecve-{source}-ok");
+        let r = policy
+            .clone()
+            .run(&[
+                "/usr/bin/rootfs-helper", "fexecve", "/usr/bin/rootfs-helper", source,
+                "rootfs-helper", "echo", out.as_str(),
+            ])
+            .await
+            .unwrap();
+        assert!(
+            r.success() && r.stdout_str().unwrap_or("").contains(&out),
+            "fexecve from {source} should run the image, exit={:?} stderr: {}",
+            r.code(),
+            r.stderr_str().unwrap_or(""),
+        );
+    }
+
+    cleanup_rootfs(&rootfs);
+}
+
+fn install_script(rootfs: &PathBuf, name: &str, body: &str) {
+    let path = rootfs.join("usr/bin").join(name);
+    fs::write(&path, body).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// The kernel opens a script's `#!` interpreter itself, against the host root.
+/// It must be the image's, and see the argv the kernel would give it, nested
+/// scripts included: rootfs-helper dispatches on argv[0] like busybox.
+#[tokio::test]
+async fn test_chroot_shebang_runs_the_image_interpreter() {
+    let rootfs = build_test_rootfs("shebang-image");
+    install_script(&rootfs, "inner", "#!/usr/bin/rootfs-helper echo\n");
+    install_script(&rootfs, "outer", "#!/usr/bin/inner\n");
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    for (script, want) in [
+        ("/usr/bin/inner", "/usr/bin/inner a b"),
+        ("/usr/bin/outer", "/usr/bin/inner /usr/bin/outer a b"),
+    ] {
+        let r = policy.clone().run(&[script, "a", "b"]).await.unwrap();
+        assert!(
+            r.success() && r.stdout_str().unwrap_or("").trim_end() == want,
+            "{script} should print {want:?}, exit={:?} stdout: {:?} stderr: {}",
+            r.code(),
+            r.stdout_str(),
+            r.stderr_str().unwrap_or(""),
+        );
+    }
+    cleanup_rootfs(&rootfs);
+}
+
+/// A shebang naming the rootfs by its host path must not reach the host file.
+#[tokio::test]
+async fn test_chroot_shebang_does_not_resolve_on_the_host() {
+    let rootfs = build_test_rootfs("shebang-host");
+    let host_helper = rootfs.join("usr/bin/rootfs-helper").canonicalize().unwrap();
+    install_script(&rootfs, "probe", &format!("#!{} echo\n", host_helper.display()));
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    let r = policy.clone().run(&["/usr/bin/probe", "escaped"]).await.unwrap();
+    assert!(
+        !r.success() && !r.stdout_str().unwrap_or("").contains("escaped"),
+        "host-path interpreter must not run, exit={:?} stdout: {}",
+        r.code(),
+        r.stdout_str().unwrap_or(""),
+    );
+    cleanup_rootfs(&rootfs);
+}
+
+/// The interpreter reads the script itself, unmodified, by the path it was
+/// exec'd under.
+#[tokio::test]
+async fn test_chroot_shebang_interpreter_reads_the_original_script() {
+    let rootfs = build_test_rootfs("shebang-selfcat");
+    let script = "#!/usr/bin/rootfs-helper cat\nbody\n";
+    install_script(&rootfs, "selfcat", script);
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    let r = policy.clone().run(&["/usr/bin/selfcat"]).await.unwrap();
+    assert!(
+        r.success() && r.stdout_str().unwrap_or("").trim_end() == script.trim_end(),
+        "cat should print the original script, exit={:?} stdout: {:?} stderr: {}",
+        r.code(),
+        r.stdout_str(),
+        r.stderr_str().unwrap_or(""),
+    );
+    cleanup_rootfs(&rootfs);
+}
+
+/// A script that is its own interpreter fails with ELOOP, as under the
+/// kernel, rather than re-exec'ing forever.
+#[tokio::test]
+async fn test_chroot_shebang_loop_is_eloop() {
+    let rootfs = build_test_rootfs("shebang-loop");
+    install_script(&rootfs, "loop", "#!/usr/bin/loop\n");
+    let policy = minimal_exec_policy(&rootfs).build().unwrap();
+
+    let r = policy.clone().run(&["/usr/bin/loop"]).await.unwrap();
+    let stderr = r.stderr_str().unwrap_or("").to_string();
+    assert!(
+        !r.success() && stderr.contains("Too many levels of symbolic links"),
+        "self-interpreting script must fail with ELOOP, exit={:?} stderr: {stderr}",
+        r.code(),
+    );
+    cleanup_rootfs(&rootfs);
+}

@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::io;
-use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
 use super::structs::{
     LandlockRulesetAttr, SYS_LANDLOCK_ADD_RULE, SYS_LANDLOCK_CREATE_RULESET,
@@ -227,4 +227,30 @@ pub fn memfd_create(name: &str, flags: u32) -> io::Result<OwnedFd> {
         )?
     };
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// A memfd that will be exec'd. `MFD_EXEC` keeps a `vm.memfd_noexec=1` host
+/// from sealing it non-executable; kernels before 6.3 reject the flag, and
+/// their memfds are always executable.
+pub fn memfd_create_exec(name: &str, flags: u32) -> io::Result<OwnedFd> {
+    memfd_create(name, flags | libc::MFD_EXEC).or_else(|e| match e.raw_os_error() {
+        Some(libc::EINVAL) => memfd_create(name, flags),
+        _ => Err(e),
+    })
+}
+
+/// A sealed, close-on-exec, executable memfd holding `bytes`.
+pub fn sealed_exec_memfd(name: &str, bytes: &[u8]) -> io::Result<OwnedFd> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::from(memfd_create_exec(
+        name,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+    )?);
+    file.write_all(bytes)?;
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file.into())
 }

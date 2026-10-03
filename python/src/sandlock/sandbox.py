@@ -195,6 +195,29 @@ def renames(changes: Sequence[Change]) -> list[tuple[str, str]]:
     )
 
 
+@dataclass(frozen=True)
+class ImageConfig:
+    """How a container image expects to be run."""
+
+    entrypoint: tuple[str, ...] = ()
+    cmd: tuple[str, ...] = ()
+    env: tuple[str, ...] = ()
+    """``KEY=VALUE`` entries."""
+    working_dir: str | None = None
+
+    def default_cmd(self) -> list[str]:
+        """Entrypoint followed by Cmd, or ``/bin/sh`` when the image sets neither."""
+        return [*self.entrypoint, *self.cmd] or ["/bin/sh"]
+
+
+@dataclass(frozen=True)
+class Image:
+    """A container image unpacked by :func:`sandlock.pull_image`."""
+
+    rootfs: str
+    config: ImageConfig = field(default_factory=ImageConfig)
+
+
 @dataclass
 class Sandbox:
     """Sandbox configuration and runtime handle.
@@ -209,8 +232,9 @@ class Sandbox:
     Most config fields are optional — unset fields mean "no restriction".
     Sandlock's default syscall blocklist is always applied.
 
-    Runtime kwargs (``name``, ``policy_fn``, ``init_fn``, ``work_fn``) have
-    ``metadata={"runtime": True}`` so serializers can skip them.
+    Runtime kwargs (``name``, ``image``, ``policy_fn``, ``init_fn``,
+    ``work_fn``) have ``metadata={"runtime": True}`` so serializers can skip
+    them.
     """
 
     # Filesystem (Landlock)
@@ -397,10 +421,19 @@ class Sandbox:
     chroot: str | None = None
     """Path to chroot into before applying other confinement."""
 
+    image: Image | None = field(default=None, metadata={"runtime": True})
+    """Run inside a container image from :func:`sandlock.pull_image`.  Its
+    env and working directory only fill what ``env`` and ``cwd`` leave
+    unset.  A runtime kwarg: it names a local cache path, not policy."""
+
     fs_mount: Mapping[str, str] = field(default_factory=dict)
     """Map virtual paths to host directories inside chroot.
     Example: {"/work": "/host/sandbox/work"} makes /work inside the
     chroot resolve to /host/sandbox/work on the host."""
+
+    fs_mount_ro: Mapping[str, str] = field(default_factory=dict)
+    """Like ``fs_mount``, but writes under the virtual path are denied
+    with EACCES. A virtual path may not appear in both mappings."""
 
     # Environment
     clean_env: bool = False
@@ -496,6 +529,8 @@ class Sandbox:
                 raise ValueError("sandbox name must not contain '/'")
             if self.name in (".", ".."):
                 raise ValueError("sandbox name must not be '.' or '..'")
+        self.on_exit = BranchAction(self.on_exit)
+        self.on_error = BranchAction(self.on_error)
         # Runtime state — not dataclass fields, not serialized
         self._native = None   # _NativePolicy created lazily on first use
         self._handle = None   # live sandbox handle during start()/run()

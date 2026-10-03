@@ -193,6 +193,14 @@ type Sandbox struct {
 	// like a bind mount without kernel mounts or root.
 	FSMount map[string]string
 
+	// FSMountRO is FSMount for mounts whose writes fail with EACCES. A
+	// virtual path may not appear in both maps.
+	FSMountRO map[string]string
+
+	// Image runs the sandbox inside a container image from PullImage. Its
+	// Env and WorkingDir only fill what Env and Cwd leave unset.
+	Image *Image
+
 	// Protection opt-out (Landlock per-protection posture).
 	//
 	// By default every protection is enforced strictly, which requires the
@@ -310,6 +318,30 @@ type Result struct {
 	Stdout   []byte     // captured standard output
 	Stderr   []byte     // captured standard error
 	Changes  []Change   // what the run did to its COW branch; empty without Workdir
+}
+
+// Image is a container image unpacked by PullImage.
+type Image struct {
+	Rootfs string      `json:"rootfs"`
+	Config ImageConfig `json:"config"`
+}
+
+// ImageConfig is how an image expects to be run.
+type ImageConfig struct {
+	Entrypoint []string `json:"entrypoint,omitempty"`
+	Cmd        []string `json:"cmd,omitempty"`
+	Env        []string `json:"env,omitempty"` // "KEY=VALUE" entries
+	WorkingDir string   `json:"working_dir,omitempty"`
+}
+
+// DefaultCmd is Entrypoint followed by Cmd, or /bin/sh when the image sets
+// neither.
+func (c ImageConfig) DefaultCmd() []string {
+	cmd := append(append([]string{}, c.Entrypoint...), c.Cmd...)
+	if len(cmd) == 0 {
+		return []string{"/bin/sh"}
+	}
+	return cmd
 }
 
 // StdioMode selects how one of a Popen'd process's standard streams is wired.

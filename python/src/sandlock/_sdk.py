@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import json
 import os
 import signal
 import sys
@@ -12,7 +13,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
-from .sandbox import Change, Entry, Sandbox as PolicyDataclass
+from .sandbox import BranchAction, Change, Entry, Image, ImageConfig, Sandbox as PolicyDataclass
 
 # ----------------------------------------------------------------
 # Load the shared library
@@ -79,7 +80,9 @@ _b_gpu_devices = _builder_fn("sandlock_sandbox_builder_gpu_devices", ctypes.POIN
 _b_workdir = _builder_fn("sandlock_sandbox_builder_workdir", ctypes.c_char_p)
 _b_cwd = _builder_fn("sandlock_sandbox_builder_cwd", ctypes.c_char_p)
 _b_chroot = _builder_fn("sandlock_sandbox_builder_chroot", ctypes.c_char_p)
+_b_image = _builder_fn("sandlock_sandbox_builder_image", ctypes.c_char_p)
 _b_fs_mount = _builder_fn("sandlock_sandbox_builder_fs_mount", ctypes.c_char_p, ctypes.c_char_p)
+_b_fs_mount_ro = _builder_fn("sandlock_sandbox_builder_fs_mount_ro", ctypes.c_char_p, ctypes.c_char_p)
 _b_on_exit = _builder_fn("sandlock_sandbox_builder_on_exit", ctypes.c_uint8)
 _b_on_error = _builder_fn("sandlock_sandbox_builder_on_error", ctypes.c_uint8)
 _b_max_memory = _builder_fn("sandlock_sandbox_builder_max_memory", ctypes.c_uint64)
@@ -316,6 +319,15 @@ _lib.sandlock_handle_free.argtypes = [_c_handle_p]
 
 _lib.sandlock_handle_pending.restype = ctypes.c_int
 _lib.sandlock_handle_pending.argtypes = [_c_handle_p]
+
+_lib.sandlock_image_pull.restype = ctypes.c_void_p
+_lib.sandlock_image_pull.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+
+_lib.sandlock_profile_resolve.restype = ctypes.c_void_p
+_lib.sandlock_profile_resolve.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+
+_lib.sandlock_profile_dir.restype = ctypes.c_void_p
+_lib.sandlock_profile_dir.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
 
 _lib.sandlock_handle_upper_dir.restype = ctypes.c_void_p
 _lib.sandlock_handle_upper_dir.argtypes = [_c_handle_p]
@@ -759,6 +771,68 @@ _ENTRY_KINDS = ("file", "dir", "symlink", "other")  # sandlock_entry_kind order
 _CHANGE_BEFORE, _CHANGE_AFTER = 0, 1
 
 
+def pull_image(reference: str, cache_dir: str | os.PathLike | None = None) -> Image:
+    """Fetch and unpack a container image, reusing the cache when it is
+    already there.
+
+    ``reference`` uses skopeo's transport syntax: ``"docker://python:3.12"``
+    (registry), ``"docker-daemon:myapp:dev"`` (local Docker daemon),
+    ``"oci:<dir>[:tag]"`` or ``"oci-archive:<file>[:tag]"``.
+    ``cache_dir`` defaults to ``$XDG_CACHE_HOME/sandlock/images``.
+    """
+    err = ctypes.c_void_p()
+    out = _lib.sandlock_image_pull(
+        _encode(reference),
+        _encode(os.fspath(cache_dir)) if cache_dir is not None else None,
+        ctypes.byref(err),
+    )
+    if not out:
+        from .exceptions import SandlockError
+        raise SandlockError(_take_string(err.value) or f"failed to pull image {reference!r}")
+    data = json.loads(_take_string(out))
+    config = data.get("config") or {}
+    return Image(
+        rootfs=data["rootfs"],
+        config=ImageConfig(
+            entrypoint=tuple(config.get("entrypoint") or ()),
+            cmd=tuple(config.get("cmd") or ()),
+            env=tuple(config.get("env") or ()),
+            working_dir=config.get("working_dir"),
+        ),
+    )
+
+
+def resolve_profile(text: str) -> dict:
+    """Parse a TOML profile with the core parser; raises ValueError."""
+    err = ctypes.c_void_p()
+    out = _lib.sandlock_profile_resolve(_encode(text), ctypes.byref(err))
+    if not out:
+        raise ValueError(_take_string(err.value) or "invalid profile")
+    return json.loads(_take_string(out))
+
+
+def profile_dir() -> str:
+    """Directory of named profiles; raises ValueError without a usable home."""
+    err = ctypes.c_void_p()
+    out = _lib.sandlock_profile_dir(ctypes.byref(err))
+    if not out:
+        raise ValueError(_take_string(err.value) or "no profile directory")
+    return _take_string(out)
+
+
+def _image_to_json(image: Image) -> str:
+    c = image.config
+    return json.dumps({
+        "rootfs": os.fspath(image.rootfs),
+        "config": {
+            "entrypoint": list(c.entrypoint),
+            "cmd": list(c.cmd),
+            "env": list(c.env),
+            "working_dir": c.working_dir,
+        },
+    })
+
+
 def _take_string(p) -> str | None:
     if not p:
         return None
@@ -1071,7 +1145,7 @@ class _NativePolicy:
     # is Python-side only; no_coredump is a Python convenience alias).
     _HANDLED_FIELDS: set[str] = {
         "fs_writable", "fs_readable", "fs_denied", "fs_storage",
-        "workdir", "cwd", "chroot", "fs_mount", "on_exit", "on_error",
+        "workdir", "cwd", "chroot", "image", "fs_mount", "fs_mount_ro", "on_exit", "on_error",
         "max_memory", "max_disk", "max_processes", "max_cpu", "num_cpus",
         "cpu_cores", "gpu_devices",
         "net_allow", "net_deny", "net_allow_bind", "net_deny_bind",
@@ -1118,15 +1192,22 @@ class _NativePolicy:
             b = _b_cwd(b, _encode(str(policy.cwd)))
         if policy.chroot:
             b = _b_chroot(b, _encode(str(policy.chroot)))
+        if policy.image is not None:
+            b = _b_image(b, _encode(_image_to_json(policy.image)))
         for vp, hp in (policy.fs_mount or {}).items():
             b = _b_fs_mount(b, _encode(str(vp)), _encode(str(hp)))
+        for vp, hp in (policy.fs_mount_ro or {}).items():
+            b = _b_fs_mount_ro(b, _encode(str(vp)), _encode(str(hp)))
 
         # COW branch actions (0=Commit, 1=Abort, 2=Keep, 3=Defer)
         _action_map = {"commit": 0, "abort": 1, "keep": 2, "defer": 3}
-        on_exit_val = policy.on_exit.value if hasattr(policy.on_exit, 'value') else str(policy.on_exit)
-        on_error_val = policy.on_error.value if hasattr(policy.on_error, 'value') else str(policy.on_error)
-        b = _b_on_exit(b, _action_map.get(on_exit_val, 0))
-        b = _b_on_error(b, _action_map.get(on_error_val, 1))
+        on_exit_val = BranchAction(policy.on_exit).value
+        on_error_val = BranchAction(policy.on_error).value
+        # An image's writes are always discarded, and the native build rejects
+        # any other exit action, so leave the COMMIT default unsent for it.
+        if policy.image is None or on_exit_val != "commit":
+            b = _b_on_exit(b, _action_map[on_exit_val])
+        b = _b_on_error(b, _action_map[on_error_val])
 
         if policy.max_memory is not None:
             if isinstance(policy.max_memory, str):

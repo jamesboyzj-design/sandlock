@@ -11,6 +11,7 @@ pub(crate) mod resume;
 pub(crate) const CTRL_FD: i32 = 3;   // control-blob memfd
 pub(crate) const READY_FD: i32 = 4;  // eventfd: stub -> supervisor ("layout done")
 pub(crate) const GO_FD: i32 = 5;     // eventfd: supervisor -> stub ("pages written")
+pub(crate) const STUB_FD: i32 = 6;   // sealed memfd holding the stub image itself
 
 pub(crate) use capture::capture;
 

@@ -104,6 +104,8 @@ with Sandbox(fs_readable=["/usr", "/lib"]) as sb:
 | `workdir` | `str \| None` | `None` | Working directory; enables COW protection |
 | `chroot` | `str \| None` | `None` | Path to chroot into before confinement |
 | `fs_mount` | `dict[str, str]` | `{}` | Map virtual paths to host directories inside chroot |
+| `fs_mount_ro` | `dict[str, str]` | `{}` | Like `fs_mount`, but writes under the virtual path are denied |
+| `image` | `Image \| None` | `None` | Run inside a container image from `pull_image()` |
 | `cwd` | `str \| None` | `None` | Child working directory |
 
 #### Network
@@ -178,6 +180,52 @@ sandbox = Sandbox(
     fs_readable=["/usr", "/bin", "/lib", "/etc"],
 )
 ```
+
+#### Container images
+
+`sandlock.pull_image(reference, cache_dir=None) -> Image` fetches and unpacks
+a container image without a Docker daemon or root. `Sandbox(image=...)` runs
+inside it: the image's rootfs becomes the chroot, read access to `/` inside it
+is granted, and its env and working directory fill only what `env` and `cwd`
+leave unset.
+
+Like a container's writable layer, every write lands in a copy-on-write
+branch that is discarded when the run ends, so the cached image never
+changes. To keep output, mount a host directory with `fs_mount` and grant it
+in `fs_writable`; setting `workdir`, or an `on_error` other than `"abort"`,
+is rejected, and `on_exit` is always abort. The cache belongs to the
+invoking user, so it is only as protected as that user's other files.
+
+| Reference | Source |
+|-----------|--------|
+| `docker://python:3.12`, `docker://ghcr.io/org/img@sha256:...` | registry (Docker Hub by default) |
+| `oci:<dir>[:tag]` | OCI image layout directory |
+| `oci-archive:<file>[:tag]` | tar of an OCI image layout |
+| `docker-daemon:<ref>`, `docker-daemon:sha256:<id>` | local Docker daemon (Docker 25+) |
+
+```python
+from sandlock import Sandbox, pull_image
+
+image = pull_image("docker://python:3.12-slim")
+result = Sandbox(image=image, max_memory="512M").run(["python3", "-c", "print('hello')"])
+
+# Keep output on the host; writes elsewhere are discarded.
+Sandbox(image=image, fs_mount={"/out": "/srv/job-1"}, fs_writable=["/out"]).run(
+    ["python3", "-c", "open('/out/result.txt', 'w').write('done')"]
+)
+
+# Or the image's own command:
+Sandbox(image=image).run(image.config.default_cmd())
+```
+
+`Image` has `rootfs` and `config`; `ImageConfig` has `entrypoint`, `cmd`,
+`env` (`KEY=VALUE` strings), `working_dir`, and `default_cmd()`. Both are
+frozen dataclasses. References use skopeo's transport syntax (containers-transports(5)): the transport prefix is required, and a tag together with a digest is rejected. Registry credentials come from `docker login`'s
+`~/.docker/config.json` (or `$DOCKER_CONFIG`); credential helpers are not
+run. Every blob is verified against its digest, and each image is unpacked
+once into `cache_dir`, or `$XDG_CACHE_HOME/sandlock/images` by default. A
+cached image named by digest starts without network access. Failures raise
+`SandlockError`.
 
 #### Resource limits
 
@@ -720,8 +768,9 @@ Default store: `~/.sandlock/checkpoints/`.
 
 ### Profiles
 
-Load sandbox configuration from TOML files:
-Profiles contain sandbox config only; pass the sandbox name at construction: `Sandbox(..., name=...)`.
+Load sandbox configuration from TOML files in `~/.config/sandlock/profiles/`.
+They are parsed by the same core parser as the CLI, so a profile means the
+same thing to both. Profiles contain sandbox config only; pass the sandbox name at construction: `Sandbox(..., name=...)`.
 
 ```python
 from sandlock import load_profile, list_profiles

@@ -24,9 +24,11 @@
 pub(crate) mod net;
 mod sock_diag;
 pub(crate) mod net_dispatch;
+mod metadata;
 mod net_metadata;
 pub(crate) use net_dispatch::{handle_net_open, handle_net_directory};
-pub(crate) use net_metadata::{handle_net_metadata, handle_pinned_metadata};
+pub(crate) use metadata::handle_pinned_metadata;
+pub(crate) use net_metadata::handle_net_metadata;
 
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -881,40 +883,9 @@ pub(crate) fn resolve_to_normalized_absolute(
     chroot_mounts: &[(std::path::PathBuf, std::path::PathBuf)],
     processes: &ProcessIndex,
 ) -> Option<std::path::PathBuf> {
-    use std::path::{Component, Path, PathBuf};
+    use std::path::{Component, PathBuf};
 
-    // The dirfd/cwd symlink target is the *real* host directory. Under
-    // chroot, sandlock services /proc, /etc and /dev via on-behalf opens,
-    // so that target is e.g. `<chroot>/proc` while the child's absolute
-    // spelling of the same file is `/proc/...`. Map the base back into the
-    // sandbox's virtual namespace so relative and absolute spellings
-    // resolve identically and the open-family shims (proc synthesis,
-    // /etc/hosts, /etc/hostname, random seed, CA inject) match either way.
-    let to_virtual = |host: PathBuf| match chroot_root {
-        Some(root) => {
-            crate::chroot::resolve::host_to_virtual(root, chroot_mounts, &host).unwrap_or(host)
-        }
-        None => host,
-    };
-
-    let joined: PathBuf = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else if dirfd as i32 == libc::AT_FDCWD {
-        // Under chroot the supervisor services chdir itself and the child's
-        // real cwd never moves, so its own notion is the only current one,
-        // and it is already virtual. Falling back to the kernel's is right
-        // only for a task that has never moved, which is when nothing is
-        // tracked.
-        let base = match i32::try_from(pid).ok().and_then(|p| processes.virtual_cwd(p)) {
-            Some(tracked) => tracked,
-            None => to_virtual(std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?),
-        };
-        base.join(path)
-    } else {
-        let base = std::fs::read_link(format!("/proc/{}/fd/{}", pid, dirfd as i32)).ok()?;
-        to_virtual(base).join(path)
-    };
-
+    let joined = joined_absolute(pid, dirfd, path, chroot_root, chroot_mounts, processes)?;
     let mut out = PathBuf::new();
     for comp in joined.components() {
         match comp {
@@ -937,6 +908,50 @@ pub(crate) fn resolve_to_normalized_absolute(
     Some(match chroot_root {
         None => through_task_root_and_cwd(out, pid, processes),
         Some(_) => out,
+    })
+}
+
+/// `path` joined to the base it resolves against, without normalization.
+pub(crate) fn joined_absolute(
+    pid: u32,
+    dirfd: i64,
+    path: &str,
+    chroot_root: Option<&std::path::Path>,
+    chroot_mounts: &[(std::path::PathBuf, std::path::PathBuf)],
+    processes: &ProcessIndex,
+) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    // The dirfd/cwd symlink target is the *real* host directory. Under
+    // chroot, sandlock services /proc, /etc and /dev via on-behalf opens,
+    // so that target is e.g. `<chroot>/proc` while the child's absolute
+    // spelling of the same file is `/proc/...`. Map the base back into the
+    // sandbox's virtual namespace so relative and absolute spellings
+    // resolve identically and the open-family shims (proc synthesis,
+    // /etc/hosts, /etc/hostname, random seed, CA inject) match either way.
+    let to_virtual = |host: PathBuf| match chroot_root {
+        Some(root) => {
+            crate::chroot::resolve::host_to_virtual(root, chroot_mounts, &host).unwrap_or(host)
+        }
+        None => host,
+    };
+
+    Some(if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else if dirfd as i32 == libc::AT_FDCWD {
+        // Under chroot the supervisor services chdir itself and the child's
+        // real cwd never moves, so its own notion is the only current one,
+        // and it is already virtual. Falling back to the kernel's is right
+        // only for a task that has never moved, which is when nothing is
+        // tracked.
+        let base = match i32::try_from(pid).ok().and_then(|p| processes.virtual_cwd(p)) {
+            Some(tracked) => tracked,
+            None => to_virtual(std::fs::read_link(format!("/proc/{}/cwd", pid)).ok()?),
+        };
+        base.join(path)
+    } else {
+        let base = std::fs::read_link(format!("/proc/{}/fd/{}", pid, dirfd as i32)).ok()?;
+        to_virtual(base).join(path)
     })
 }
 
