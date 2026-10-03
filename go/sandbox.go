@@ -264,7 +264,7 @@ type Sandbox struct {
 
 	// Determinism.
 	RandomSeed        *uint64 // seed getrandom() deterministically
-	TimeStart         string  // virtual clock start: RFC3339 or unix seconds
+	TimeStart         string  // virtual clock start, RFC 3339, e.g. "2000-01-01T00:00:00Z"
 	NoRandomizeMemory bool    // disable ASLR
 	NoHugePages       bool    // disable transparent huge pages
 	DeterministicDirs bool    // sort readdir() entries
