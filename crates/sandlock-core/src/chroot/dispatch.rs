@@ -1694,6 +1694,63 @@ fn stat_and_write(notif: &SeccompNotif, notif_fd: RawFd, path: &Path) -> NotifAc
     NotifAction::ReturnValue(0)
 }
 
+/// An empty faccessat2 path names an existing descriptor, not a pathname
+/// to reopen. Pin it before awaiting COW state, map upper-layer names back
+/// to policy names, and query the same descriptor after authorization.
+async fn access_empty_path(
+    notif: &SeccompNotif,
+    cow_state: &Arc<Mutex<CowState>>,
+    ctx: &ChrootCtx<'_>,
+    mode: i32,
+    flags: i32,
+) -> NotifAction {
+    let dirfd = notif.data.args[0] as i32;
+    let pinned = if dirfd == libc::AT_FDCWD {
+        // chdir is virtual: /proc/<pid>/cwd can still name the old cwd.
+        let cwd = match virtual_cwd_of(notif, ctx) {
+            Some(cwd) => cwd,
+            None => return NotifAction::Errno(libc::EACCES),
+        };
+        match open_in_namespace(ctx, notif.pid, &cwd, libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC, 0, 0) {
+            Ok(fd) => fd,
+            Err(errno) => return NotifAction::Errno(errno),
+        }
+    } else {
+        match crate::seccomp::notif::dup_fd_from_pid(notif.pid, dirfd) {
+            Ok(fd) => fd,
+            Err(e) => return NotifAction::Errno(e.raw_os_error().unwrap_or(libc::EBADF)),
+        }
+    };
+    let actual = match std::fs::read_link(format!("/proc/self/fd/{}", pinned.as_raw_fd())) {
+        Ok(path) => path,
+        Err(_) => return NotifAction::Errno(libc::EACCES),
+    };
+    let cs = cow_state.lock().await;
+    let logical = match cs.branch.as_ref() {
+        Some(cow) => match actual.strip_prefix(cow.upper_dir()) {
+            Ok(relative) => cow.workdir().join(relative),
+            Err(_) => actual.clone(),
+        },
+        None => actual.clone(),
+    };
+    drop(cs);
+    // Anonymous objects already held by the child carry no filesystem path
+    // authority. For tree objects, require the virtual read/write grants.
+    if logical.is_absolute() && !logical.as_os_str().as_encoded_bytes().starts_with(b"/memfd:") {
+        let vp = match ctx.host_to_virtual(&logical) {
+            Some(vp) => vp,
+            None => return NotifAction::Errno(libc::EACCES),
+        };
+        if !ctx.can_read(&vp) || (mode & libc::W_OK != 0 && !ctx.can_write(&vp)) {
+            return NotifAction::Errno(libc::EACCES);
+        }
+    }
+    // Do not fake W_OK on a lower fd: this query names the held inode, not
+    // a future pathname open that could copy it up to a different inode.
+    let ret = unsafe { libc::faccessat(pinned.as_raw_fd(), c"".as_ptr(), mode, flags) };
+    if ret == 0 { NotifAction::ReturnValue(0) } else { NotifAction::Errno(last_errno(libc::EACCES)) }
+}
+
 pub(crate) async fn handle_chroot_stat(
     notif: &SeccompNotif,
     _chroot_state: &Arc<Mutex<ChrootState>>,
@@ -1713,12 +1770,23 @@ pub(crate) async fn handle_chroot_stat(
         {
             return NotifAction::Errno(libc::EINVAL);
         }
+        let path = match read_path(notif, notif.data.args[1], notif_fd) {
+            Some(path) => path,
+            None => return NotifAction::Errno(libc::EFAULT),
+        };
+        if path.is_empty() {
+            return if flags & libc::AT_EMPTY_PATH as u64 != 0 {
+                access_empty_path(notif, cow_state, ctx, mode, flags as i32).await
+            } else {
+                NotifAction::Errno(libc::ENOENT)
+            };
+        }
     }
 
     // AT_EMPTY_PATH: fstat(fd, &statbuf) — the fd already points to the
     // correct file (injected by the chroot handler or inherited). Let the
     // kernel stat it directly.
-    if (flags & libc::AT_EMPTY_PATH as u64) != 0 {
+    if !is_access && (flags & libc::AT_EMPTY_PATH as u64) != 0 {
         return NotifAction::Continue;
     }
 

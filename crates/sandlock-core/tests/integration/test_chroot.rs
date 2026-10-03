@@ -2603,3 +2603,66 @@ async fn check_access_modes(cow: bool) {
     fs::remove_dir_all(mounted).unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[tokio::test]
+async fn test_chroot_empty_path_access_respects_virtual_view() {
+    check_empty_path_access(false).await;
+}
+
+#[tokio::test]
+async fn test_chroot_cow_empty_path_access_respects_virtual_view() {
+    check_empty_path_access(true).await;
+}
+
+async fn check_empty_path_access(cow: bool) {
+    let rootfs = build_test_rootfs(&format!("empty-access-{cow}"));
+    let mounted = temp_dir(&format!("empty-access-mount-{cow}"));
+    for directory in ["ro", "rw", "mnt"] {
+        fs::create_dir_all(rootfs.join(directory)).unwrap();
+    }
+    for dir in [rootfs.join("ro"), rootfs.join("rw"), mounted.clone()] {
+        fs::write(dir.join("data"), b"KEEP").unwrap();
+        fs::set_permissions(dir.join("data"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(dir.join("lower-ro"), b"KEEP").unwrap();
+        fs::set_permissions(dir.join("lower-ro"), fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    let mut builder = minimal_exec_policy(&rootfs)
+        .fs_read("/ro").fs_write("/rw").fs_mount_ro("/mnt", &mounted);
+    if cow { builder = builder.workdir(&rootfs).on_exit(BranchAction::Abort); }
+    let policy = builder.build().unwrap();
+    let empty = libc::AT_EMPTY_PATH;
+    let mut failures = Vec::new();
+    for (kind, path, mode, flags, errno) in [
+        ("fd", "/ro/data", libc::R_OK, empty, 0),
+        ("fd", "/ro/data", libc::W_OK, empty, libc::EACCES),
+        ("fd", "/mnt/data", libc::W_OK, empty, libc::EACCES),
+        ("fd", "/rw/data", libc::R_OK | libc::W_OK, empty, 0),
+        ("upper", "/rw/data", libc::R_OK | libc::W_OK, empty, 0),
+        ("name", "/ro/data", libc::R_OK, empty, 0),
+        ("name", "/ro/data", libc::W_OK, empty, libc::EACCES),
+        ("name", "/rw/data", libc::W_OK, empty, 0),
+        ("cwd", "/ro", libc::W_OK, empty, libc::EACCES),
+        ("cwd", "/rw", libc::R_OK | libc::W_OK, empty, 0),
+        ("fd", "/rw/data", libc::R_OK, 0, libc::ENOENT),
+        ("invalid", "/rw/data", libc::F_OK, empty, libc::EBADF),
+        ("fd", "/rw/data", 8, empty, libc::EINVAL),
+        ("fd", "/ro/data", libc::R_OK, empty | libc::AT_EACCESS, 0),
+        ("fd", "/ro/data", libc::R_OK, empty | libc::AT_SYMLINK_NOFOLLOW, 0),
+        ("fd", "/rw/lower-ro", libc::W_OK, empty, libc::EACCES),
+        ("fd", "/rw/data", libc::F_OK, empty | 0x400000, libc::EINVAL),
+        ("anonymous", "/unused", libc::R_OK | libc::W_OK, empty, 0),
+        ("deleted", "/rw/data", libc::R_OK | libc::W_OK, empty, 0),
+    ] {
+        let result = policy.clone().run(&[
+            "rootfs-helper", "access-empty", kind, path, &mode.to_string(), &flags.to_string(),
+        ]).await.expect("sandbox must run without a skip");
+        assert!(result.success(), "helper: {:?}", result.stderr_str());
+        let expected = if errno == 0 { "OK".into() } else { format!("ERR:{errno}") };
+        if result.stdout_str().unwrap().trim() != expected {
+            failures.push(format!("{kind}({path}, {mode}, {flags}): expected {expected}, got {:?}", result.stdout_str()));
+        }
+    }
+    cleanup_rootfs(&rootfs);
+    fs::remove_dir_all(mounted).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

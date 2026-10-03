@@ -300,6 +300,34 @@ static int cmd_access_mode(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_access_empty(int argc, char **argv) {
+    if (argc != 4) return 2;
+    int mode = (int)strtol(argv[2], NULL, 0);
+    int flags = (int)strtol(argv[3], NULL, 0);
+    int fd = AT_FDCWD;
+    const char *path = "";
+    if (strcmp(argv[0], "name") == 0) path = argv[1];
+    else if (strcmp(argv[0], "cwd") == 0) {
+        if (chdir(argv[1]) < 0) return 3;
+    } else if (strcmp(argv[0], "invalid") == 0) fd = -1;
+    else if (strcmp(argv[0], "anonymous") == 0) {
+        fd = syscall(SYS_memfd_create, "access-empty", 0);
+        if (fd < 0) return 3;
+    } else {
+        int open_flags = strcmp(argv[0], "upper") == 0
+            ? O_RDWR | O_CREAT | O_TRUNC : O_RDONLY;
+        fd = open(argv[1], open_flags, 0600);
+        if (fd < 0) { perror("access-empty open"); return 3; }
+        if (strcmp(argv[0], "deleted") == 0 && unlink(argv[1]) < 0) return 3;
+    }
+    long result = syscall(439, fd, path, mode, flags);
+    int error = errno;
+    if (fd >= 0) close(fd);
+    if (result < 0) printf("ERR:%d\n", error);
+    else puts("OK");
+    return 0;
+}
+
 /* ── getxattr (non-standard: print an extended attribute value) ── */
 static int cmd_getxattr(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "getxattr: usage: getxattr <file> <name>\n"); return 1; }
@@ -927,6 +955,7 @@ static int cmd_fexecve(int argc, char **argv) {
 /* ── dispatch ───────────────────────────────────────────────── */
 
 static int dispatch(const char *cmd, int argc, char **argv) {
+    if (strcmp(cmd, "access-empty") == 0) return cmd_access_empty(argc, argv);
     if (strcmp(cmd, "access-mode") == 0)   return cmd_access_mode(argc, argv);
     if (strcmp(cmd, "open-flags") == 0)    return cmd_open_flags(argc, argv);
     if (strcmp(cmd, "chdir") == 0)          return cmd_chdir(argc, argv);
