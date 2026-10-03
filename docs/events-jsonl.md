@@ -93,13 +93,14 @@ policy includes ordinary path grants, not an implicit hidden permission.
 
 ```sh
 cargo test --release -p sandlock-cli --test runtime_events
-cargo test --release -p sandlock-cli --test strict_tls
+cargo test --release -p sandlock-core --test integration test_http_strict_tls
 ```
 
-Tests require real Linux sandbox support. The TLS integration probe also needs
-Python 3 with `ssl.VERIFY_X509_STRICT`, OpenSSL CLI, and the system CA bundle at
-`/etc/ssl/certs/ca-certificates.crt`. It uses a local TLS server and synthetic
-credentials, keeps certificate verification enabled, and changes no global
-trust store. Generated MITM leaves carry AKI; generated CAs declare signing key
-usage. User-provided invalid CAs are not silently repaired. HTTPS-only credential
-transport enforcement remains separate work.
+Tests require real Linux sandbox support. Strict TLS regression coverage lives
+in `sandlock-core`: it uses a temporary injected CA bundle and inline Python
+with `ssl.VERIFY_X509_STRICT`, then confirms the HTTP ACL returns its expected
+403 response. It needs no upstream server, system CA bundle, or OpenSSL CLI.
+Tool-free certificate structure tests check the minted leaf AKI against the CA
+SKI and verify the CA `keyCertSign` usage. User-provided invalid CAs are not
+silently repaired. HTTPS-only credential transport enforcement remains separate
+work.

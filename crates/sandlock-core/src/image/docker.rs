@@ -74,3 +74,4 @@ async fn save(docker: &Docker, name: &str, dest: &Path) -> Result<(), SandlockEr
 fn docker_error(msg: String) -> SandlockError {
     SandboxRuntimeError::Child(format!("docker-daemon: {msg}")).into()
 }
+
