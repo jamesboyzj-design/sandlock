@@ -244,7 +244,7 @@ type Sandbox struct {
 	// HTTP ACL (method + host + path rules via a transparent proxy).
 	HTTPAllow   []string // allow rules, "METHOD host/path"
 	HTTPDeny    []string // deny rules, checked before allow rules
-	HTTPPorts   []int    // ports to intercept (defaults to 80, plus 443 with a CA)
+	HTTPPorts   []uint16 // ports to intercept (defaults to 80, plus 443 with a CA)
 	HTTPCAFile  string   // PEM CA certificate for HTTPS MITM
 	HTTPKeyFile string   // PEM CA private key (required with HTTPCAFile)
 

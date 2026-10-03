@@ -1242,6 +1242,9 @@ class _NativePolicy:
         for rule in (policy.http_deny or []):
             b = _b_http_deny(b, _encode(str(rule)))
         for port in (policy.http_ports or []):
+            # ctypes truncates to the u16 the ABI carries, so 70000 would arrive as 4464.
+            if not 0 <= int(port) <= 0xFFFF:
+                raise ValueError(f"http_ports: {port} is not a TCP port")
             b = _b_http_port(b, int(port))
         if policy.http_ca:
             b = _b_http_ca(b, _encode(str(policy.http_ca)))

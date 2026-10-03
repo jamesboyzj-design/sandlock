@@ -45,6 +45,13 @@ class TestCoreOwnsSizeAndTimeGrammar:
             Sandbox(time_start=datetime(2000, 1, 1))._ensure_native()
 
 
+class TestHttpPorts:
+    @pytest.mark.parametrize("port", [-1, 70000])
+    def test_out_of_range_port_is_refused(self, port):
+        with pytest.raises(ValueError, match="http_ports"):
+            Sandbox(http_ports=[port])._ensure_native()
+
+
 class TestEnsureNative:
     """``_ensure_native`` rebuilds on every call so that mutations to
     config fields between lifecycle invocations are not silently
