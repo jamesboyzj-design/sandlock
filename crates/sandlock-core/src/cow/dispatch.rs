@@ -756,7 +756,8 @@ pub(crate) async fn handle_cow_access(
         }
     };
     // Query the pinned object, avoiding a second pathname resolution after
-    // confinement. The supervisor shares the sandbox's filesystem identity.
+    // confinement. This currently queries with the supervisor's credentials;
+    // user-namespace mappings alone do not prove credential equivalence.
     let result = unsafe {
         libc::syscall(arch::SYS_FACCESSAT2, pinned.as_raw_fd(), c"".as_ptr(),
             mode & !libc::W_OK, flags | libc::AT_EMPTY_PATH)

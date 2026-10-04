@@ -1818,16 +1818,48 @@ pub(crate) async fn handle_chroot_stat(
         // must not veto an authorized W_OK. Read/execute permissions and
         // existence must still be checked instead of reporting success.
         let cs = cow_state.lock().await;
+        let open_flags = libc::O_PATH | libc::O_CLOEXEC
+            | if flags & libc::AT_SYMLINK_NOFOLLOW as u64 != 0 { libc::O_NOFOLLOW } else { 0 };
+        // Never follow a resolved host pathname with faccessat: its final
+        // component (or an ancestor) may have become a host-absolute link.
+        // Resolve within the selected virtual root, retain the resulting
+        // inode, and authorize that inode's virtual name before querying it.
+        let pinned = if let Some(cow) = cs.branch.as_ref().filter(|cow| real_path.starts_with(cow.upper_dir())) {
+            match crate::cow::dispatch::open_confined(cow.upper_dir(), cow.workdir(), &real_path, open_flags, 0) {
+                Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
+                Err(errno) => return NotifAction::Errno(errno),
+            }
+        } else {
+            match open_in_namespace(ctx, notif.pid, &vp, open_flags, 0, 0) {
+                Ok(fd) => fd,
+                Err(errno) => return NotifAction::Errno(errno),
+            }
+        };
+        let actual = match std::fs::read_link(format!("/proc/self/fd/{}", pinned.as_raw_fd())) {
+            Ok(path) => path,
+            Err(_) => return NotifAction::Errno(libc::EACCES),
+        };
+        let logical = match cs.branch.as_ref() {
+            Some(cow) => match actual.strip_prefix(cow.upper_dir()) {
+                Ok(relative) => cow.workdir().join(relative),
+                Err(_) => actual,
+            },
+            None => actual,
+        };
+        let actual_vp = match ctx.host_to_virtual(&logical) {
+            Some(path) => path,
+            None => return NotifAction::Errno(libc::EACCES),
+        };
+        if !ctx.can_read(&actual_vp) || (mode & libc::W_OK != 0 && !ctx.can_write(&actual_vp)) {
+            return NotifAction::Errno(libc::EACCES);
+        }
         let copied_on_write = cs.branch.as_ref().is_some_and(|cow| {
-            host_path.to_str().is_some_and(|path| cow.matches(path))
+            logical.to_str().is_some_and(|path| cow.matches(path))
         });
         let kernel_mode = if copied_on_write { mode & !libc::W_OK } else { mode };
-        let path = match path_cstr(&real_path, libc::EINVAL) {
-            Ok(p) => p,
-            Err(a) => return a,
-        };
         let ret = unsafe {
-            libc::faccessat(libc::AT_FDCWD, path.as_ptr(), kernel_mode, flags as i32)
+            libc::syscall(crate::arch::SYS_FACCESSAT2, pinned.as_raw_fd(), c"".as_ptr(),
+                kernel_mode, flags as i32 | libc::AT_EMPTY_PATH)
         };
         return if ret == 0 {
             NotifAction::ReturnValue(0)
