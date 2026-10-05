@@ -47,8 +47,9 @@ async fn test_review274_chroot_access_cannot_follow_host_dangling_link() {
 }
 
 /// Bounded stress supplement to the deterministic dangling-link regression.
-/// Neither valid virtual target is readable. Only a host-root traversal can
-/// report success. Errors may vary with rename timing and are not constrained.
+/// Neither valid virtual target is readable. Success indicates that another
+/// object (such as the parent or a host target) was queried instead. Errors may
+/// vary with rename timing and are not constrained.
 #[tokio::test]
 async fn test_review274_chroot_access_replacement_stress() {
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};

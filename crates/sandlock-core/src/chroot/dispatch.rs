@@ -1799,7 +1799,7 @@ pub(crate) async fn handle_chroot_stat(
     } else {
         read_and_resolve_existing(notif, notif_fd, ctx, 0, 1)
     };
-    let (_, host_path, vp) = match resolved {
+    let (requested_path, host_path, vp) = match resolved {
         Ok(r) => r,
         Err(a) => return a,
     };
@@ -1830,7 +1830,15 @@ pub(crate) async fn handle_chroot_stat(
                 Err(errno) => return NotifAction::Errno(errno),
             }
         } else {
-            match open_in_namespace(ctx, notif.pid, &vp, open_flags, 0, 0) {
+            // The preliminary resolver's name is not the request's identity:
+            // under replacement it can name a parent directory. Pin the
+            // original virtual request, then authorize the retained object
+            // below, rather than reopening that intermediate name.
+            let requested_vp = match build_virtual_path(notif, notif.data.args[0] as i64, &requested_path, ctx) {
+                Some(path) => PathBuf::from(path),
+                None => return NotifAction::Errno(libc::EACCES),
+            };
+            match open_in_namespace(ctx, notif.pid, &requested_vp, open_flags, 0, 0) {
                 Ok(fd) => fd,
                 Err(errno) => return NotifAction::Errno(errno),
             }
