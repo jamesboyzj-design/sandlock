@@ -1861,6 +1861,11 @@ pub(crate) async fn handle_chroot_stat(
             libc::syscall(crate::arch::SYS_FACCESSAT2, pinned.as_raw_fd(), c"".as_ptr(),
                 kernel_mode, flags as i32 | libc::AT_EMPTY_PATH)
         };
+        if ret == 0 && host_path.to_string_lossy().contains("review274-race") {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            unsafe { libc::fstat(pinned.as_raw_fd(), &mut st); }
+            eprintln!("ACCESS_DIAG host={host_path:?} vp={vp:?} logical={logical:?} actual_vp={actual_vp:?} mode={mode} flags={flags} stmode={:o}", st.st_mode);
+        }
         return if ret == 0 {
             NotifAction::ReturnValue(0)
         } else {

@@ -253,8 +253,16 @@ impl DispatchTable {
         let nr = notif.data.nr as i64;
         if let Some(chain) = self.chains.get(&nr) {
             let handler_ctx = HandlerCtx { notif, notif_fd, open };
-            for handler in &chain.handlers {
+            for (index, handler) in chain.handlers.iter().enumerate() {
                 let action = handler.handle(&handler_ctx).await;
+                if (nr == arch::SYS_FACCESSAT2 || nr == libc::SYS_faccessat)
+                    && matches!(action, NotifAction::ReturnValue(0) | NotifAction::Errno(0))
+                {
+                    let path = crate::seccomp::notif::read_child_cstr(notif_fd, notif.id, notif.pid, notif.data.args[1], 4096);
+                    if path.as_deref().is_some_and(|p| p.starts_with("/data/link")) {
+                        eprintln!("ACCESS_DISPATCH_DIAG index={index} action={action:?} path={path:?} mode={} flags={}", notif.data.args[2], notif.data.args[3]);
+                    }
+                }
                 if !matches!(action, NotifAction::Continue) {
                     return action;
                 }

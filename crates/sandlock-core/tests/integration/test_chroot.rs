@@ -53,7 +53,7 @@ async fn test_review274_chroot_access_cannot_follow_host_dangling_link() {
 async fn test_review274_chroot_access_replacement_stress() {
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
     let mut failures = Vec::new();
-    for intermediate in [false, true] {
+    for intermediate in [false, true].into_iter().cycle().take(40) {
         let rootfs = build_test_rootfs(&format!("review274-race-{intermediate}"));
         let outside = temp_dir(&format!("review274-race-outside-{intermediate}"));
         fs::create_dir_all(rootfs.join("data/safe")).unwrap();
