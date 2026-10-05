@@ -1830,10 +1830,9 @@ pub(crate) async fn handle_chroot_stat(
                 Err(errno) => return NotifAction::Errno(errno),
             }
         } else {
-            // The preliminary resolver's name is not the request's identity:
-            // under replacement it can name a parent directory. Pin the
-            // original virtual request, then authorize the retained object
-            // below, rather than reopening that intermediate name.
+            // Pin the original virtual request rather than reopening an
+            // intermediate resolved name; authorize the retained object below.
+            // Object selection still relies on the kernel's confined lookup.
             let requested_vp = match build_virtual_path(notif, notif.data.args[0] as i64, &requested_path, ctx) {
                 Some(path) => PathBuf::from(path),
                 None => return NotifAction::Errno(libc::EACCES),

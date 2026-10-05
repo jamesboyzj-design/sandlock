@@ -47,9 +47,10 @@ async fn test_review274_chroot_access_cannot_follow_host_dangling_link() {
 }
 
 /// Bounded stress supplement to the deterministic dangling-link regression.
-/// Neither valid virtual target is readable. Success indicates that another
-/// object (such as the parent or a host target) was queried instead. Errors may
-/// vary with rename timing and are not constrained.
+/// All in-root files and directories reachable by the replacement are unreadable;
+/// only the outside sentinel is readable. This tests confinement, not stronger
+/// object-selection guarantees than the runner's own openat2 implementation.
+/// Errors may vary with rename timing and are not constrained.
 #[tokio::test]
 async fn test_review274_chroot_access_replacement_stress() {
     use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -60,6 +61,11 @@ async fn test_review274_chroot_access_replacement_stress() {
         fs::create_dir_all(rootfs.join("data/safe")).unwrap();
         fs::write(rootfs.join("data/safe/file"), b"inside").unwrap();
         fs::set_permissions(rootfs.join("data/safe/file"), fs::Permissions::from_mode(0)).unwrap();
+        // Keep search and replacement possible, but do not mistake a readable
+        // parent for an escape: native openat2 on the ARM CI kernel can return
+        // that parent during final-link replacement, even without Sandlock.
+        fs::set_permissions(rootfs.join("data/safe"), fs::Permissions::from_mode(0o311)).unwrap();
+        fs::set_permissions(rootfs.join("data"), fs::Permissions::from_mode(0o311)).unwrap();
         fs::write(outside.join("file"), b"outside synthetic sentinel").unwrap();
         fs::set_permissions(outside.join("file"), fs::Permissions::from_mode(0o600)).unwrap();
         let outside_target = if intermediate { outside.clone() } else { outside.join("file") };
