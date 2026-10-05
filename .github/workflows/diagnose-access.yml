@@ -20,4 +20,7 @@ jobs:
           id
           rustc --version
       - name: Run release workspace with replacement diagnostics
-        run: cargo test --release --workspace --no-fail-fast -- --test-threads=1
+        run: |
+          cc -O2 -pthread diagnostics/openat2-race.c -o /tmp/openat2-race
+          /tmp/openat2-race
+          cargo test --release --workspace --no-fail-fast -- --test-threads=1

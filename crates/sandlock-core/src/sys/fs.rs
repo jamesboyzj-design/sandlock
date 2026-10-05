@@ -91,6 +91,12 @@ pub(crate) fn openat2_in_root_with_resolve(
         )
     } as i32;
 
+    if fd >= 0 && path == "/data/link" && root.to_string_lossy().contains("review274-race") {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd, &mut st) } == 0 && st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            eprintln!("OPENAT2_DIAG root={root:?} path={path:?} root_fd={root_fd} result_fd={fd} flags={flags} mode={mode} resolve={} actual={:?}", how.resolve, std::fs::read_link(format!("/proc/self/fd/{fd}")));
+        }
+    }
     unsafe { libc::close(root_fd) };
 
     if fd < 0 {
