@@ -5,11 +5,9 @@
 //!
 //! # Continue safety (issue #27)
 //!
-//! Every `Continue` in this module is a *fall-through* — the COW layer
-//! decided the syscall is outside its scope, so it lets the kernel handle
-//! the original syscall normally. No COW path was modified or rewritten
-//! when we return Continue, so the kernel's re-read sees exactly what the
-//! child originally passed. The fall-through happens when:
+//! `Continue` lets later handlers, and ultimately the kernel, process the
+//! original syscall. The COW handler does not rewrite the child's pathname.
+//! Fall-through includes unchanged access targets, as well as:
 //!
 //!   * No COW branch is active (`cow_state.branch == None`).
 //!   * The path doesn't match the COW prefix (`!cow.matches(path)`).
@@ -17,12 +15,10 @@
 //!   * The supervisor's own open/copy attempt failed and we want the
 //!     kernel to surface its own error.
 //!
-//! Because Continue means "we didn't intervene," the seccomp_unotify
-//! TOCTOU concern doesn't apply: we're not making a security decision
-//! whose validity depends on the kernel re-reading the same memory we
-//! read. Path-based security enforcement for these fall-throughs is
-//! provided by Landlock (or by the chroot dispatcher, when chroot mode
-//! is active and runs before COW).
+//! Kernel checks use the caller's credentials and Landlock confinement.
+//! The child can still change memory/pathnames before the kernel re-read;
+//! classifying a path as unchanged is not a snapshot or a resolution of #27.
+//! Chroot dispatch runs before COW and mediates its own pathname queries.
 
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Component, Path, PathBuf};
@@ -701,9 +697,53 @@ pub(crate) async fn handle_cow_write(
 // access() handler — fake W_OK for COW-managed paths
 // ============================================================
 
-/// Check access against the visible COW layer. Only W_OK is waived: the
-/// lower layer may be read-only because writes will go to the upper layer.
-/// Read/execute checks and pathname resolution still have to succeed.
+/// Find a changed visible target, including one reached through unchanged
+/// lower links. None means COW has no replacement for the kernel's answer.
+/// This classifies COW state; it is not a permission/authorization decision.
+fn changed_access_target(cow: &SeccompCowBranch, path: &str, nofollow: bool) -> Result<Option<String>, i32> {
+    let mut path = PathBuf::from(path);
+    let mut search_error = None;
+    for links in 0..=40 {
+        let Some(name) = path.to_str() else { return Ok(None) };
+        if cow.needs_read_intercept(name) {
+            return match search_error { Some(errno) => Err(errno), None => Ok(Some(name.to_owned())) };
+        }
+        if links == 40 { break; }
+        let components: Vec<_> = path.components().collect();
+        let mut prefix = PathBuf::new();
+        let mut next = None;
+        for (index, part) in components.iter().enumerate() {
+            prefix.push(part.as_os_str());
+            if nofollow && index + 1 == components.len() { break; }
+            let Ok(target) = std::fs::read_link(&prefix) else { continue };
+            let mut replaced = if target.is_absolute() { target }
+                else { prefix.parent().ok_or(libc::ENOENT)?.join(target) };
+            for tail in &components[index + 1..] { replaced.push(tail.as_os_str()); }
+            // Before lexical normalization, retain search failures such as
+            // blocked/../target. Do not turn those into a successful upper
+            // query by erasing the blocked directory. Unchanged requests
+            // still go to the kernel even if the supervisor cannot search.
+            if let Err(error) = std::fs::symlink_metadata(&replaced) {
+                if let Some(errno @ (libc::EACCES | libc::ENOTDIR)) = error.raw_os_error() {
+                    search_error = Some(errno);
+                }
+            }
+            next = Some(normalize_path(replaced));
+            break;
+        }
+        match next {
+            Some(next) => path = next,
+            None => return Ok(None),
+        }
+    }
+    // An unchanged loop remains the kernel's responsibility (ELOOP).
+    Ok(None)
+}
+
+/// Leave unchanged paths to the caller's kernel credentials. For copied-up
+/// paths only, waive W_OK and check the remaining bits against the visible
+/// object. Whiteouts still answer ENOENT. Generic metadata must not recapture
+/// the Continue returned here (see dispatch table registration).
 pub(crate) async fn handle_cow_access(
     notif: &SeccompNotif,
     cow_state: &Arc<Mutex<CowState>>,
@@ -744,12 +784,15 @@ pub(crate) async fn handle_cow_access(
         {
             return NotifAction::Errno(libc::EINVAL);
         }
-        let real = match cow.handle_stat(&path) {
-            Some(p) => p,
-            None => return NotifAction::Errno(libc::ENOENT),
+        let nofollow = flags & libc::AT_SYMLINK_NOFOLLOW != 0;
+        let changed = match changed_access_target(cow, &path, nofollow) {
+            Ok(Some(path)) => path,
+            Ok(None) => return NotifAction::Continue,
+            Err(errno) => return NotifAction::Errno(errno),
         };
+        let Some(real) = cow.handle_stat(&changed) else { return NotifAction::Errno(libc::ENOENT) };
         let open_flags = libc::O_PATH | libc::O_CLOEXEC
-            | if flags & libc::AT_SYMLINK_NOFOLLOW != 0 { libc::O_NOFOLLOW } else { 0 };
+            | if nofollow { libc::O_NOFOLLOW } else { 0 };
         match open_confined(cow.upper_dir(), cow.workdir(), &real, open_flags, 0) {
             Ok(fd) => unsafe { OwnedFd::from_raw_fd(fd) },
             Err(e) => return NotifAction::Errno(e),

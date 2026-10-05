@@ -13,6 +13,92 @@ fn helper_binary() -> PathBuf {
         .expect("rootfs-helper not found — build.rs should have compiled it")
 }
 
+/// Review r4174284513 also has a deterministic form: a link dangling in
+/// the virtual root must not be followed again against the host root.
+#[tokio::test]
+async fn test_review274_chroot_access_cannot_follow_host_dangling_link() {
+    let rootfs = build_test_rootfs("review274-dangling");
+    let outside = temp_dir("review274-outside");
+    fs::write(outside.join("sentinel"), b"synthetic fixture").unwrap();
+    fs::set_permissions(outside.join("sentinel"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir_all(rootfs.join("data")).unwrap();
+    std::os::unix::fs::symlink(outside.join("sentinel"), rootfs.join("data/link")).unwrap();
+    let mut failures = Vec::new();
+    for cow in [false, true] {
+        let mut builder = minimal_exec_policy(&rootfs).fs_write("/data");
+        if cow { builder = builder.workdir(&rootfs).on_exit(BranchAction::Abort); }
+        let policy = builder.build().unwrap();
+        for spelling in ["access", "faccessat", "faccessat2"] {
+            for mode in [libc::F_OK, libc::R_OK, libc::X_OK, libc::R_OK | libc::W_OK] {
+                let result = policy.clone().run(&[
+                    "rootfs-helper", "access-mode", spelling, "/data/link", &mode.to_string(),
+                ]).await.expect("real sandbox query must execute");
+                assert!(result.success(), "{:?}", result.stderr_str());
+                let expected = format!("ERR:{}", libc::ENOENT);
+                if result.stdout_str().unwrap().trim() != expected {
+                    failures.push(format!("cow={cow}, {spelling}, {mode}: {:?}", result.stdout_str()));
+                }
+            }
+        }
+    }
+    cleanup_rootfs(&rootfs);
+    fs::remove_dir_all(outside).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Bounded stress supplement to the deterministic dangling-link regression.
+/// Neither valid virtual target is readable. Only a host-root traversal can
+/// report success. Errors may vary with rename timing and are not constrained.
+#[tokio::test]
+async fn test_review274_chroot_access_replacement_stress() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    let mut failures = Vec::new();
+    for intermediate in [false, true] {
+        let rootfs = build_test_rootfs(&format!("review274-race-{intermediate}"));
+        let outside = temp_dir(&format!("review274-race-outside-{intermediate}"));
+        fs::create_dir_all(rootfs.join("data/safe")).unwrap();
+        fs::write(rootfs.join("data/safe/file"), b"inside").unwrap();
+        fs::set_permissions(rootfs.join("data/safe/file"), fs::Permissions::from_mode(0)).unwrap();
+        fs::write(outside.join("file"), b"outside synthetic sentinel").unwrap();
+        fs::set_permissions(outside.join("file"), fs::Permissions::from_mode(0o600)).unwrap();
+        let outside_target = if intermediate { outside.clone() } else { outside.join("file") };
+        let inside_target = if intermediate { "safe" } else { "safe/file" };
+        let queried = if intermediate { "/data/link/file" } else { "/data/link" };
+        std::os::unix::fs::symlink(inside_target, rootfs.join("data/link")).unwrap();
+        for cow in [false, true] {
+            let stopped = Arc::new(AtomicBool::new(false));
+            let flag = stopped.clone();
+            let data = rootfs.join("data");
+            let outside_target = outside_target.clone();
+            let writer = std::thread::spawn(move || {
+                let mut swaps = 0;
+                while !flag.load(Ordering::Relaxed) {
+                    for target in [std::path::Path::new(inside_target), outside_target.as_path()] {
+                        std::os::unix::fs::symlink(target, data.join("next")).unwrap();
+                        fs::rename(data.join("next"), data.join("link")).unwrap();
+                        swaps += 1;
+                    }
+                }
+                swaps
+            });
+            let mut builder = minimal_exec_policy(&rootfs).fs_write("/data");
+            if cow { builder = builder.workdir(&rootfs).on_exit(BranchAction::Abort); }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(20),
+                builder.build().unwrap().run(&["rootfs-helper", "access-repeat", queried])).await;
+            stopped.store(true, Ordering::Relaxed);
+            assert!(writer.join().unwrap() > 0, "replacement thread must run");
+            let result = result.expect("bounded access stress timed out").expect("sandbox must run");
+            assert!(result.success(), "{:?}", result.stderr_str());
+            if result.stdout_str().unwrap().trim() != "SUCCESSES:0" {
+                failures.push(format!("intermediate={intermediate}, cow={cow}: {:?}", result.stdout_str()));
+            }
+        }
+        cleanup_rootfs(&rootfs);
+        fs::remove_dir_all(outside).unwrap();
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Minimal fs_readable set needed to run rootfs-helper under chroot.
 fn minimal_exec_policy(rootfs: &PathBuf) -> sandlock_core::SandboxBuilder {
     Sandbox::builder()
