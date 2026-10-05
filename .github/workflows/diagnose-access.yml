@@ -1,0 +1,23 @@
+name: Diagnose PR274 ARM access replacement
+on:
+  push:
+    branches: [diagnose/pr274-arm-access]
+permissions:
+  contents: read
+jobs:
+  access-replacement:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Match upstream user namespace setup
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Record environment
+        run: |
+          uname -a
+          id
+          rustc --version
+      - name: Run release workspace with replacement diagnostics
+        run: cargo test --release --workspace --no-fail-fast -- --test-threads=1
